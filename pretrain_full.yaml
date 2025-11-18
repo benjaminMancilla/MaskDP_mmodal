@@ -1,5 +1,5 @@
 defaults:
-  - agent: mdp_multimodal
+  - agent: mdp
   - override hydra/launcher: submitit_local
   - _self_
 

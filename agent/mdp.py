@@ -11,7 +11,7 @@ from einops import rearrange, reduce, repeat
 from agent.modules.attention import Block, CausalSelfAttention
 
 
-class MaskedDP(nn.Module):
+class MaskedDPMultimodal(nn.Module):
     def __init__(self, obs_dim, action_dim, config):
         super().__init__()
         # MAE encoder specifics
@@ -23,16 +23,27 @@ class MaskedDP(nn.Module):
         print("norm", self.norm)
         self.state_embed = nn.Linear(obs_dim, self.n_embd)
         self.action_embed = nn.Linear(action_dim, self.n_embd)
-        self.encoder_blocks = nn.ModuleList(
+        
+        # Separate encoders for state and action
+        self.state_encoder_blocks = nn.ModuleList(
             [Block(config) for _ in range(config.n_enc_layer)]
         )
-        self.encoder_norm = nn.LayerNorm(self.n_embd)
+        self.action_encoder_blocks = nn.ModuleList(
+            [Block(config) for _ in range(config.n_enc_layer)]
+        )
+        
+        # Normalization for encoders
+        self.state_encoder_norm = nn.LayerNorm(self.n_embd)
+        self.action_encoder_norm = nn.LayerNorm(self.n_embd)
+        
+        # Mask tokens for encoders
+        self.state_mask_token = nn.Parameter(torch.zeros(1, 1, self.n_embd))
+        self.action_mask_token = nn.Parameter(torch.zeros(1, 1, self.n_embd))
+        
         # --------------------------------------------------------------------------
         # MAE decoder specifics
         self.decoder_state_embed = nn.Linear(self.n_embd, self.n_embd)
         self.decoder_action_embed = nn.Linear(self.n_embd, self.n_embd)
-
-        self.mask_token = nn.Parameter(torch.zeros(1, 1, self.n_embd))
 
         self.decoder_blocks = nn.ModuleList(
             [Block(config) for _ in range(config.n_dec_layer)]
@@ -53,16 +64,34 @@ class MaskedDP(nn.Module):
         self.initialize_weights()
 
     def initialize_weights(self):
+        # Separate positional embeddings for state and action
+        pos_embed_state = utils.get_1d_sincos_pos_embed_from_grid(
+            self.n_embd, self.max_len // 2
+        )
+        pos_embed_action = utils.get_1d_sincos_pos_embed_from_grid(
+            self.n_embd, self.max_len // 2
+        )
+        
+        pe_state = torch.from_numpy(pos_embed_state).float().unsqueeze(0) / 2.0
+        pe_action = torch.from_numpy(pos_embed_action).float().unsqueeze(0) / 2.0
+        
+        self.register_buffer("pos_embed_state", pe_state)
+        self.register_buffer("pos_embed_action", pe_action)
+        
+        # For decoder we use full pos_embed
         pos_embed = utils.get_1d_sincos_pos_embed_from_grid(self.n_embd, self.max_len)
         pe = torch.from_numpy(pos_embed).float().unsqueeze(0) / 2.0
-        self.register_buffer("pos_embed", pe)
         self.register_buffer("decoder_pos_embed", pe)
+        
         self.register_buffer(
             "attn_mask", torch.ones(self.max_len, self.max_len)[None, None, ...]
         )
+        
         # timm's trunc_normal_(std=.02) is effectively normal_(std=0.02) as cutoff is too big (2.)
-        torch.nn.init.normal_(self.mask_token, std=0.02)
-        # initialize nn.Linear and nn.LayerNorm
+        # Init mask tokens
+        torch.nn.init.normal_(self.state_mask_token, std=0.02)
+        torch.nn.init.normal_(self.action_mask_token, std=0.02)
+        
         self.apply(self._init_weights)
 
     def _init_weights(self, m):
@@ -106,52 +135,76 @@ class MaskedDP(nn.Module):
 
     def forward_encoder(self, states, actions, mask_ratio):
         batch_size, T, obs_dim = states.size()
+        
+        # Embeddings
         s_emb = self.state_embed(states)
         a_emb = self.action_embed(actions)
+        
+        # Separate positional embeddings
+        s_emb = s_emb + self.pos_embed_state[:, :T, :]
+        a_emb = a_emb + self.pos_embed_action[:, :T, :]
+        
+        # Apply masking separately
+        s_masked, s_mask, s_ids_restore = self.random_masking(s_emb, mask_ratio)
+        a_masked, a_mask, a_ids_restore = self.random_masking(a_emb, mask_ratio)
+        
+        # Process with separate encoders
+        s_encoded = s_masked
+        for blk in self.state_encoder_blocks:
+            s_encoded = blk(s_encoded, self.attn_mask)
+        s_encoded = self.state_encoder_norm(s_encoded)
+        
+        a_encoded = a_masked
+        for blk in self.action_encoder_blocks:
+            a_encoded = blk(a_encoded, self.attn_mask)
+        a_encoded = self.action_encoder_norm(a_encoded)
+        
+        return s_encoded, a_encoded, s_mask, a_mask, s_ids_restore, a_ids_restore
 
-        x = (
-            torch.stack([s_emb, a_emb], dim=1)
-            .permute(0, 2, 1, 3)
-            .reshape(batch_size, 2 * T, self.n_embd)
+    def forward_decoder(self, s_encoded, a_encoded, s_ids_restore, a_ids_restore):
+        # Append mask tokens
+        s_mask_tokens = self.state_mask_token.repeat(
+            s_encoded.shape[0], s_ids_restore.shape[1] - s_encoded.shape[1], 1
         )
-        x = x + self.pos_embed
-        x, mask, ids_restore = self.random_masking(x, mask_ratio)
-        # apply Transformer blocks
-        for blk in self.encoder_blocks:
-            x = blk(x, self.attn_mask)
-        x = self.encoder_norm(x)
-        return x, mask, ids_restore
-
-    def forward_decoder(self, x, ids_restore):
-        # append mask tokens to sequence
-        mask_tokens = self.mask_token.repeat(
-            x.shape[0], ids_restore.shape[1] - x.shape[1], 1
+        a_mask_tokens = self.action_mask_token.repeat(
+            a_encoded.shape[0], a_ids_restore.shape[1] - a_encoded.shape[1], 1
         )
-        x_ = torch.cat([x, mask_tokens], dim=1)
-        x = torch.gather(
-            x_, dim=1, index=ids_restore.unsqueeze(-1).repeat(1, 1, x.shape[2])
-        )  # unshuffle
-        s = self.decoder_state_embed(x[:, ::2])
-        a = self.decoder_action_embed(x[:, 1::2])
-
-        x = torch.stack([s, a], dim=1).permute(0, 2, 1, 3).reshape_as(x)
-
-        # add pos embed
-        x = x + self.decoder_pos_embed
-
-        # apply Transformer blocks
+        
+        # Unshuffle states and actions
+        s_full = torch.cat([s_encoded, s_mask_tokens], dim=1)
+        s_unshuffled = torch.gather(
+            s_full, dim=1, index=s_ids_restore.unsqueeze(-1).repeat(1, 1, s_full.shape[2])
+        )
+        
+        a_full = torch.cat([a_encoded, a_mask_tokens], dim=1)
+        a_unshuffled = torch.gather(
+            a_full, dim=1, index=a_ids_restore.unsqueeze(-1).repeat(1, 1, a_full.shape[2])
+        )
+        
+        # Project to decoder
+        s = self.decoder_state_embed(s_unshuffled)
+        a = self.decoder_action_embed(a_unshuffled)
+        
+        # Interleave actions and states for the decoder
+        x = torch.stack([s, a], dim=2).reshape(s.shape[0], s.shape[1] * 2, s.shape[2])
+        
+        # Add positional embeddings
+        x = x + self.decoder_pos_embed[:, :x.shape[1], :]
+        
+        # Apply Transformer blocks
         for blk in self.decoder_blocks:
             x = blk(x, self.attn_mask)
+        
+        # Split and predict
+        s_pred = self.state_head(x[:, ::2])
+        a_pred = self.action_head(x[:, 1::2])
+        
+        return s_pred, a_pred
 
-        # predictor projection
-        s = self.state_head(x[:, ::2])
-        a = self.action_head(x[:, 1::2])
-
-        return s, a
-
-    def forward_loss(self, target_s, target_a, pred_s, pred_a, mask):
+    def forward_loss(self, target_s, target_a, pred_s, pred_a, s_mask, a_mask):
         batch_size, T, _ = target_s.size()
-        # apply normalization
+        
+        # State normalization
         if self.norm == "l2":
             target_s = target_s / torch.norm(target_s, dim=-1, keepdim=True)
         elif self.norm == "mae":
@@ -161,18 +214,19 @@ class MaskedDP(nn.Module):
 
         loss_s = (pred_s - target_s) ** 2
         loss_a = (pred_a - target_a) ** 2
-        loss = (
-            torch.stack([loss_s.mean(dim=-1), loss_a.mean(dim=-1)], dim=1)
-            .permute(0, 2, 1)
-            .reshape(batch_size, 2 * T)
-        )
-        masked_loss = (loss * mask).sum() / mask.sum()  # mean loss on removed patches
+        
+        # Separate mask losses
+        masked_loss_s = (loss_s.mean(dim=-1) * s_mask).sum() / s_mask.sum()
+        masked_loss_a = (loss_a.mean(dim=-1) * a_mask).sum() / a_mask.sum()
+        
+        masked_loss = masked_loss_s + masked_loss_a
         loss_s = loss_s.mean()
         loss_a = loss_a.mean()
+        
         return masked_loss, loss_s, loss_a
 
 
-class MaskedDPAgent:
+class MaskedDPMultimodalAgent:
     def __init__(
         self,
         name,
@@ -192,7 +246,7 @@ class MaskedDPAgent:
         self.config = transformer_cfg
 
         # models
-        self.model = MaskedDP(obs_shape[0], action_shape[0], transformer_cfg).to(device)
+        self.model = MaskedDPMultimodal(obs_shape[0], action_shape[0], transformer_cfg).to(device)
         self.mask_ratio = mask_ratio
         # optimizers
         self.opt = torch.optim.Adam(self.model.parameters(), lr=lr)
@@ -209,15 +263,21 @@ class MaskedDPAgent:
     def update_mdp(self, states, actions):
         metrics = dict()
         mask_ratio = np.random.choice(self.mask_ratio)
-        latent, mask, ids_restore = self.model.forward_encoder(
-            states, actions, mask_ratio
-        )
+        
+        # Separate encoders
+        s_enc, a_enc, s_mask, a_mask, s_ids_restore, a_ids_restore = \
+            self.model.forward_encoder(states, actions, mask_ratio)
+        
+        # Decoder
         pred_s, pred_a = self.model.forward_decoder(
-            latent, ids_restore
-        )  # [N, L, p*p*3]
-        mask_loss, state_loss, action_loss = self.model.forward_loss(
-            states, actions, pred_s, pred_a, mask
+            s_enc, a_enc, s_ids_restore, a_ids_restore
         )
+        
+        # Loss
+        mask_loss, state_loss, action_loss = self.model.forward_loss(
+            states, actions, pred_s, pred_a, s_mask, a_mask
+        )
+        
         if self.config.loss == "masked":
             loss = mask_loss
         elif self.config.loss == "total":
@@ -240,13 +300,17 @@ class MaskedDPAgent:
         metrics = dict()
         batch = next(val_iter)
         obs, action, _, _, _, _ = utils.to_torch(batch, self.device)
+        
         mask_ratio = np.random.choice(self.mask_ratio)
-        latent, mask, ids_restore = self.model.forward_encoder(obs, action, mask_ratio)
+        s_enc, a_enc, s_mask, a_mask, s_ids_restore, a_ids_restore = \
+            self.model.forward_encoder(obs, action, mask_ratio)
+        
         pred_s, pred_a = self.model.forward_decoder(
-            latent, ids_restore
-        )  # [N, L, p*p*3]
+            s_enc, a_enc, s_ids_restore, a_ids_restore
+        )
+        
         mask_loss, state_loss, action_loss = self.model.forward_loss(
-            obs, action, pred_s, pred_a, mask
+            obs, action, pred_s, pred_a, s_mask, a_mask
         )
 
         if self.use_tb:
