@@ -11,7 +11,7 @@ dependencies:
   - scikit-image=0.18.1
   - pip:
     - termcolor==1.1.0
-    - git+http://github.com/deepmind/dm_control.git
+    - dm-control==1.0.20                 
     - tb-nightly
     - imageio==2.9.0
     - imageio-ffmpeg==0.4.4
