@@ -1,5 +1,5 @@
 defaults:
-  - agent: mdp_goal
+  - agent: mdp_mm_goal
   - override hydra/launcher: submitit_local
   - _self_
 
@@ -10,8 +10,8 @@ discount: 0.99
 num_eval_episodes: 100
 eval_every_steps: 10000
 # snapshot
-snapshot_ts: 300000 # 300k from paper
-snapshot_base_dir: /home/bmancilla/scratch/maskdp_snapshots/1898
+snapshot_ts: 300000 # 300k from paper 
+snapshot_base_dir: /home/bmancilla/archive/MaskDP/maskdp_snapshots/2268
 # dataset
 batch_size: ${agent.batch_size}
 
@@ -26,8 +26,8 @@ device: cuda
 save_video: true
 use_tb: true
 use_wandb: true
-project: maskdp-eval
-notes: "eval single-task single-goal"
+project: maskdp-mm-eval
+notes: "eval single-task single-goal for mm"
 replan: true
 
 

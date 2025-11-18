@@ -27,7 +27,7 @@ save_video: true
 use_tb: true
 use_wandb: true
 project: maskdp-eval
-notes: "eval single-task single-goal"
+notes: "eval single-task multi-goal"
 replan: true
 
 

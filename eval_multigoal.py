@@ -36,9 +36,10 @@ def get_data_seed(seed, num_data_seeds):
 
 
 def get_dir(cfg):
-    snapshot_base_dir = Path(cfg.snapshot_base_dir)
-    snapshot_dir = snapshot_base_dir / get_domain(cfg.task)
-    snapshot = snapshot_dir / str(1) / f"snapshot_{cfg.snapshot_ts}.pt"
+    domain = get_domain(cfg.task)
+    snapshot_dir = Path(cfg.snapshot_base_dir) / domain / str(cfg.seed)
+    snapshot = snapshot_dir / f"snapshot_{cfg.snapshot_ts}.pt"
+    print("loading from", snapshot)
     return snapshot
 
 
@@ -267,7 +268,7 @@ def eval_mdp(
         log("step", global_step)
 
 
-@hydra.main(config_path=".", config_name="eval")
+@hydra.main(config_path=".", config_name="eval_multi")
 def main(cfg):
     work_dir = Path.cwd()
     print(f"workspace: {work_dir}")
@@ -297,7 +298,6 @@ def main(cfg):
     )
     wandb.init(
         project=cfg.project,
-        entity="maskdp",
         name=exp_name,
         config=wandb_config,
         settings=wandb.Settings(

@@ -36,9 +36,10 @@ def get_data_seed(seed, num_data_seeds):
 
 
 def get_dir(cfg):
-    snapshot_base_dir = Path(cfg.snapshot_base_dir)
-    snapshot_dir = snapshot_base_dir / get_domain(cfg.task)
-    snapshot = snapshot_dir / str(1) / f"snapshot_{cfg.snapshot_ts}.pt"
+    domain = get_domain(cfg.task)
+    snapshot_dir = Path(cfg.snapshot_base_dir) / domain / str(cfg.seed)
+    snapshot = snapshot_dir / f"snapshot_{cfg.snapshot_ts}.pt"
+    print("loading from", snapshot)
     return snapshot
 
 
@@ -250,7 +251,6 @@ def main(cfg):
     )
     wandb.init(
         project=cfg.project,
-        entity="maskdp",
         name=exp_name,
         config=wandb_config,
         settings=wandb.Settings(
@@ -302,7 +302,7 @@ def main(cfg):
 
     if eval_every_step(global_step):
         logger.log("eval_total_time", timer.total_time(), global_step)
-        if cfg.agent.name == "mdp_goal":
+        if cfg.agent.name in ["mdp_goal", "mdp_mm_goal"]:
             eval_mdp(
                 global_step,
                 agent,
