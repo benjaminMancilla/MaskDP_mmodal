@@ -1,0 +1,40 @@
+defaults:
+  - agent: mdp_multimodal
+  - override hydra/launcher: submitit_local
+  - _self_
+
+# task settings
+task: cheetah_run
+discount: 0.99
+# train settings
+num_grad_steps: 400010
+log_every_steps: 1000
+# eval
+eval_every_steps: 10000
+num_eval_episodes: 10
+# snapshot
+snapshots: [0, 100000, 150000, 200000, 250000, 300000, 350000, 400000, 450000, 500000, 550000, 600000]
+snapshot_dir: /home/bmancilla/archive/maskdp_snapshots
+# resume
+resume: false
+resume_dir: none
+resume_step: 0
+# dataset
+replay_buffer_dir: /home/bmancilla/archive/maskdp_data/maskdp_train
+replay_buffer_size: 2000000
+replay_buffer_num_workers: 16
+batch_size: ${agent.batch_size}
+
+# Misceláneos
+seed: 1
+device: cuda
+save_video: false
+use_tb: true
+use_wandb: true
+project: maskdp-mm
+notes: "pretrain-full cheetah mm"
+exp_name: pretrain_full_mm_${task}
+
+hydra:
+  run:
+    dir: /home/bmancilla/scratch/maskdp_runs/${now:%Y.%m.%d}/${now:%H%M%S}_${agent.name}_${task}

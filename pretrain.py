@@ -42,7 +42,7 @@ def get_data_seed(seed, num_data_seeds):
     return (seed - 1) % num_data_seeds + 1
 
 
-@hydra.main(config_path=".", config_name="pretrain")
+@hydra.main(config_path=".", config_name="pretrain_full")
 def main(cfg):
     work_dir = Path.cwd()
     print(f"workspace: {work_dir}")
@@ -78,7 +78,6 @@ def main(cfg):
     )
     wandb.init(
         project=cfg.project,
-        entity="maskdp",
         name=exp_name,
         config=wandb_config,
         settings=wandb.Settings(
