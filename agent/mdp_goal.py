@@ -9,10 +9,10 @@ import utils
 from dm_control.utils import rewards
 from einops import rearrange, reduce, repeat
 from agent.modules.attention import Block, CausalSelfAttention
-from agent.mdp import MaskedDP
+from agent.mdp import MaskedDPMultimodal
 
 
-class MDPGoalAgent:
+class MDP_MM_GoalAgent:
     def __init__(
         self,
         name,
@@ -50,15 +50,22 @@ class MDPGoalAgent:
 
     def _freeze_layers(self):
         frozen_layers = [
-            self.mdp.pos_embed,
-            self.mdp.decoder_pos_embed,
             self.mdp.state_embed,
             self.mdp.action_embed,
-            self.mdp.mask_token,
+            self.mdp.decoder_pos_embed,
+            self.mdp.decoder_state_embed,
+            self.mdp.decoder_action_embed,
+            self.mdp.state_mask_token,
+            self.mdp.action_mask_token,
         ]
 
         if self.finetune == "decoder":
-            frozen_layers += [self.mdp.encoder_blocks, self.mdp.encoder_norm]
+            frozen_layers += [
+                self.mdp.state_encoder_blocks, 
+                self.mdp.state_encoder_norm,
+                self.mdp.action_encoder_blocks, 
+                self.mdp.action_encoder_norm,
+            ]
 
         if self.finetune == "linear":
             frozen_layers += [
@@ -95,16 +102,14 @@ class MDPGoalAgent:
 
         assert goal.shape[1] == len(time_budgets)
         T = time_budgets[-1]
-        if 2 * (T + 1) > self.mdp.pos_embed.shape[1]:
-            pos_embed = utils.interpolate_pos_embed(self.mdp.pos_embed, 2 * (T + 1))
-            decoder_pos_embed = utils.interpolate_pos_embed(
-                self.mdp.decoder_pos_embed, 2 * (T + 1)
-            )
+        if 2 * (T + 1) > self.mdp.decoder_pos_embed.shape[1]:
+            pos_embed = utils.interpolate_pos_embed(self.mdp.decoder_pos_embed, 2 * (T + 1))
+            decoder_pos_embed = pos_embed
             attn_mask = torch.ones(2 * (T + 1), 2 * (T + 1))[None, None, ...].to(
                 self.device
             )
         else:
-            pos_embed = self.mdp.pos_embed
+            pos_embed = self.mdp.decoder_pos_embed
             decoder_pos_embed = self.mdp.decoder_pos_embed
             attn_mask = self.mdp.attn_mask
 
@@ -112,18 +117,18 @@ class MDPGoalAgent:
         g_emb = self.mdp.state_embed(goal) + pos_embed[:, time_budgets * 2]
         # encoder
         x = torch.cat([s_emb, g_emb], dim=1)
-        for blk in self.mdp.encoder_blocks:
+        for blk in self.mdp.state_encoder_blocks:
             x = blk(x, attn_mask)
-        x = self.mdp.encoder_norm(x)
+        x = self.mdp.state_encoder_norm(x)
 
         if T > 1:
-            obs = self.mdp.mask_token.repeat(obs.shape[0], T + 1, 1)
+            obs = self.mdp.state_mask_token.repeat(obs.shape[0], T + 1, 1)
             obs[:, 0] = x[:, 0]
             obs[:, time_budgets] = x[:, 1:]
         else:
             obs = x
 
-        mask_actions = self.mdp.mask_token.repeat(obs.shape[0], T + 1, 1)
+        mask_actions = self.mdp.action_mask_token.repeat(obs.shape[0], T + 1, 1)
         obs = self.mdp.decoder_state_embed(obs)
         mask_actions = self.mdp.decoder_action_embed(mask_actions)
 
@@ -142,16 +147,14 @@ class MDPGoalAgent:
     def act(self, obs, goal, T):
         obs = torch.as_tensor(obs, device=self.device).unsqueeze(0)
         goal = torch.as_tensor(goal, device=self.device).unsqueeze(0)
-        if 2 * (T + 1) > self.mdp.pos_embed.shape[1]:
-            pos_embed = utils.interpolate_pos_embed(self.mdp.pos_embed, 2 * (T + 1))
-            decoder_pos_embed = utils.interpolate_pos_embed(
-                self.mdp.decoder_pos_embed, 2 * (T + 1)
-            )
+        if 2 * (T + 1) > self.mdp.decoder_pos_embed.shape[1]:
+            pos_embed = utils.interpolate_pos_embed(self.mdp.decoder_pos_embed, 2 * (T + 1))
+            decoder_pos_embed = pos_embed
             attn_mask = torch.ones(2 * (T + 1), 2 * (T + 1))[None, None, ...].to(
                 self.device
             )
         else:
-            pos_embed = self.mdp.pos_embed
+            pos_embed = self.mdp.decoder_pos_embed
             decoder_pos_embed = self.mdp.decoder_pos_embed
             attn_mask = self.mdp.attn_mask
 
@@ -159,18 +162,18 @@ class MDPGoalAgent:
         g_emb = self.mdp.state_embed(goal) + pos_embed[:, 2 * T]
         # encoder
         x = torch.cat([s_emb, g_emb], dim=1)
-        for blk in self.mdp.encoder_blocks:
+        for blk in self.mdp.state_encoder_blocks:
             x = blk(x, attn_mask)
-        x = self.mdp.encoder_norm(x)
+        x = self.mdp.state_encoder_norm(x)
 
         if T > 1:
-            mask_states = self.mdp.mask_token.repeat(obs.shape[0], T - 1, 1)
+            mask_states = self.mdp.state_mask_token.repeat(obs.shape[0], T - 1, 1)
             obs = torch.cat([x[:, 0].unsqueeze(1), mask_states], dim=1)
             obs = torch.cat([obs, x[:, -1].unsqueeze(1)], dim=1)
         else:
             obs = x
 
-        mask_actions = self.mdp.mask_token.repeat(obs.shape[0], T + 1, 1)
+        mask_actions = self.mdp.action_mask_token.repeat(obs.shape[0], T + 1, 1)
         obs = self.mdp.decoder_state_embed(obs)
         mask_actions = self.mdp.decoder_action_embed(mask_actions)
 
