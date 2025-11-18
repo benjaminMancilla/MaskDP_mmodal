@@ -6,17 +6,20 @@ action_shape: ??? # to be specified later
 device: ${device}
 lr: 1e-4
 use_tb: ${use_tb}
-batch_size: 1024 # 256 for pixels
+batch_size: 384 # Batch size Table 2
 mask_ratio: [0.15, 0.35, 0.55, 0.75, 0.95]
 transformer_cfg:
-  n_embd: 128
-  n_head: 2
-  n_enc_layer: 1
-  n_dec_layer: 1
+  # Hparams from paper (Table 2)
+  traj_length: 64           # context length
+  n_embd: 256               # hidden dim
+  n_head: 4                 # attention heads
+  n_enc_layer: 3            # encoder layers
+  n_dec_layer: 2            # decoder layers
+
+  # This stays the same
   embd_pdrop: 0
   resid_pdrop: 0
   attn_pdrop: 0
-  traj_length: 128
   pe: 'fixed'
   loss: 'total'
   norm: 'l2'

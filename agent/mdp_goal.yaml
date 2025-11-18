@@ -17,6 +17,6 @@ transformer_cfg:
   resid_pdrop: 0
   attn_pdrop: 0
   mask_ratio: 0.75
-  traj_length: 16
+  traj_length: 5
   loss: 'masked'
   pe: 'fixed'
