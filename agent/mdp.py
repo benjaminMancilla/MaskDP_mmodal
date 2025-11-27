@@ -95,16 +95,20 @@ class MaskedDPMultimodal(nn.Module):
             nn.init.constant_(m.bias, 0)
             nn.init.constant_(m.weight, 1.0)
 
-    def random_masking(self, x, mask_ratio):
+    def random_masking(self, s_emb, a_emb, mask_ratio):
         """
         Perform per-sample random masking by per-sample shuffling.
         Per-sample shuffling is done by argsort random noise.
         x: [N, L, D], sequence
+
+        Applies the same masking pattern for states and actions
+        to maintain temporal consistency
         """
-        N, L, D = x.shape  # batch, length, dim
+        N, L, D = s_emb.shape  # batch, length, dim
         len_keep = int(L * (1 - mask_ratio))
 
-        noise = torch.rand(N, L, device=x.device)  # noise in [0, 1]
+        # Use the same noise for both modalities (if time t is masked, s_t AND a_t are too)
+        noise = torch.rand(N, L, device=s_emb.device)  # noise in [0, 1]
 
         # sort noise for each sample
         ids_shuffle = torch.argsort(
@@ -114,15 +118,18 @@ class MaskedDPMultimodal(nn.Module):
 
         # keep the first subset
         ids_keep = ids_shuffle[:, :len_keep]
-        x_masked = torch.gather(x, dim=1, index=ids_keep.unsqueeze(-1).repeat(1, 1, D))
+
+        # Same pattern for s & a
+        s_masked = torch.gather(s_emb, dim=1, index=ids_keep.unsqueeze(-1).repeat(1, 1, D))
+        a_masked = torch.gather(a_emb, dim=1, index=ids_keep.unsqueeze(-1).repeat(1, 1, D))
 
         # generate the binary mask: 0 is keep, 1 is remove
-        mask = torch.ones([N, L], device=x.device)
+        mask = torch.ones([N, L], device=s_emb.device)
         mask[:, :len_keep] = 0
         # unshuffle to get the binary mask
         mask = torch.gather(mask, dim=1, index=ids_restore)
 
-        return x_masked, mask, ids_restore
+        return s_masked, a_masked, mask, ids_restore
 
     def forward_encoder(self, states, actions, mask_ratio):
         batch_size, T, obs_dim = states.size()
@@ -147,9 +154,10 @@ class MaskedDPMultimodal(nn.Module):
         s_emb = s_emb + self.pos_embed[:, 0:2*T:2, :]
         a_emb = a_emb + self.pos_embed[:, 1:2*T:2, :]
         
-        # Apply masking separately
-        s_masked, s_mask, s_ids_restore = self.random_masking(s_emb, mask_ratio)
-        a_masked, a_mask, a_ids_restore = self.random_masking(a_emb, mask_ratio)
+        # Apply masking SHOULD NOT be separately
+        s_masked, a_masked, mask, ids_restore = self.random_masking(
+            s_emb, a_emb, mask_ratio
+        )
         
         # Process with separate encoders
         s_encoded = s_masked
@@ -162,26 +170,26 @@ class MaskedDPMultimodal(nn.Module):
             a_encoded = blk(a_encoded, self.attn_mask)
         a_encoded = self.action_encoder_norm(a_encoded)
         
-        return s_encoded, a_encoded, s_mask, a_mask, s_ids_restore, a_ids_restore
+        return s_encoded, a_encoded, mask, ids_restore
 
-    def forward_decoder(self, s_encoded, a_encoded, s_ids_restore, a_ids_restore):
-        # Append mask tokens
+    def forward_decoder(self, s_encoded, a_encoded, ids_restore):
+        # Append mask tokens (same number of state and actions)
         s_mask_tokens = self.state_mask_token.repeat(
-            s_encoded.shape[0], s_ids_restore.shape[1] - s_encoded.shape[1], 1
+            s_encoded.shape[0], ids_restore.shape[1] - s_encoded.shape[1], 1
         )
         a_mask_tokens = self.action_mask_token.repeat(
-            a_encoded.shape[0], a_ids_restore.shape[1] - a_encoded.shape[1], 1
+            a_encoded.shape[0], ids_restore.shape[1] - a_encoded.shape[1], 1
         )
         
         # Unshuffle states and actions
         s_full = torch.cat([s_encoded, s_mask_tokens], dim=1)
         s_unshuffled = torch.gather(
-            s_full, dim=1, index=s_ids_restore.unsqueeze(-1).repeat(1, 1, s_full.shape[2])
+            s_full, dim=1, index=ids_restore.unsqueeze(-1).repeat(1, 1, s_full.shape[2])
         )
         
         a_full = torch.cat([a_encoded, a_mask_tokens], dim=1)
         a_unshuffled = torch.gather(
-            a_full, dim=1, index=a_ids_restore.unsqueeze(-1).repeat(1, 1, a_full.shape[2])
+            a_full, dim=1, index=ids_restore.unsqueeze(-1).repeat(1, 1, a_full.shape[2])
         )
         
         # Project to decoder
@@ -204,7 +212,7 @@ class MaskedDPMultimodal(nn.Module):
         
         return s_pred, a_pred
 
-    def forward_loss(self, target_s, target_a, pred_s, pred_a, s_mask, a_mask):
+    def forward_loss(self, target_s, target_a, pred_s, pred_a, mask):
         batch_size, T, _ = target_s.size()
         
         # State normalization
@@ -219,8 +227,8 @@ class MaskedDPMultimodal(nn.Module):
         loss_a = (pred_a - target_a) ** 2
         
         # Separate mask losses
-        masked_loss_s = (loss_s.mean(dim=-1) * s_mask).sum() / s_mask.sum()
-        masked_loss_a = (loss_a.mean(dim=-1) * a_mask).sum() / a_mask.sum()
+        masked_loss_s = (loss_s.mean(dim=-1) * mask).sum() / mask.sum()
+        masked_loss_a = (loss_a.mean(dim=-1) * mask).sum() / mask.sum()
         
         masked_loss = masked_loss_s + masked_loss_a
         loss_s = loss_s.mean()
@@ -268,17 +276,17 @@ class MaskedDPMultimodalAgent:
         mask_ratio = np.random.choice(self.mask_ratio)
         
         # Separate encoders
-        s_enc, a_enc, s_mask, a_mask, s_ids_restore, a_ids_restore = \
+        s_enc, a_enc, mask, ids_restore = \
             self.model.forward_encoder(states, actions, mask_ratio)
         
         # Decoder
         pred_s, pred_a = self.model.forward_decoder(
-            s_enc, a_enc, s_ids_restore, a_ids_restore
+            s_enc, a_enc, ids_restore
         )
         
         # Loss
         mask_loss, state_loss, action_loss = self.model.forward_loss(
-            states, actions, pred_s, pred_a, s_mask, a_mask
+            states, actions, pred_s, pred_a, mask
         )
         
         if self.config.loss == "masked":
@@ -305,15 +313,15 @@ class MaskedDPMultimodalAgent:
         obs, action, _, _, _, _ = utils.to_torch(batch, self.device)
         
         mask_ratio = np.random.choice(self.mask_ratio)
-        s_enc, a_enc, s_mask, a_mask, s_ids_restore, a_ids_restore = \
+        s_enc, a_enc, mask, ids_restore = \
             self.model.forward_encoder(obs, action, mask_ratio)
         
         pred_s, pred_a = self.model.forward_decoder(
-            s_enc, a_enc, s_ids_restore, a_ids_restore
+            s_enc, a_enc, ids_restore
         )
         
         mask_loss, state_loss, action_loss = self.model.forward_loss(
-            obs, action, pred_s, pred_a, s_mask, a_mask
+            obs, action, pred_s, pred_a, mask
         )
 
         if self.use_tb:
