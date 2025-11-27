@@ -64,23 +64,14 @@ class MaskedDPMultimodal(nn.Module):
         self.initialize_weights()
 
     def initialize_weights(self):
-        # Separate positional embeddings for state and action
-        pos_embed_state = utils.get_1d_sincos_pos_embed_from_grid(
-            self.n_embd, self.max_len // 2
-        )
-        pos_embed_action = utils.get_1d_sincos_pos_embed_from_grid(
-            self.n_embd, self.max_len // 2
-        )
-        
-        pe_state = torch.from_numpy(pos_embed_state).float().unsqueeze(0) / 2.0
-        pe_action = torch.from_numpy(pos_embed_action).float().unsqueeze(0) / 2.0
-        
-        self.register_buffer("pos_embed_state", pe_state)
-        self.register_buffer("pos_embed_action", pe_action)
-        
-        # For decoder we use full pos_embed
+        # Positional embeddings SHOULD NOT be separated, this actually breaks the
+        # original trayectory order
         pos_embed = utils.get_1d_sincos_pos_embed_from_grid(self.n_embd, self.max_len)
         pe = torch.from_numpy(pos_embed).float().unsqueeze(0) / 2.0
+        
+        self.register_buffer("pos_embed", pe)
+        
+        # For decoder we use full pos_embed
         self.register_buffer("decoder_pos_embed", pe)
         
         self.register_buffer(
@@ -140,9 +131,21 @@ class MaskedDPMultimodal(nn.Module):
         s_emb = self.state_embed(states)
         a_emb = self.action_embed(actions)
         
-        # Separate positional embeddings
-        s_emb = s_emb + self.pos_embed_state[:, :T, :]
-        a_emb = a_emb + self.pos_embed_action[:, :T, :]
+        # Base:
+        """
+        x = torch.stack([s_emb, a_emb], dim=1).permute(0, 2, 1, 3).reshape(batch_size, 2 * T, self.n_embd)
+        x = x + self.pos_embed
+        x, mask, ids_restore = self.random_masking(x, mask_ratio)
+        """
+        # Separating the positional embeddings this ways loses the interaction between 
+        # states and actions. In a nutshell, the interleaving is lost, this should be 
+        # fixed with the fusion encoder, so we leave for the moment.
+
+        # Separate positional embeddings and consider even and odd pos
+        # States are even: 0, 2, 4, 6, ... (idex s0, s1, s2, s3, ...)
+        # Actions are odd: 1, 3, 5, 7, ... (index a0, a1, a2, a3, ...)
+        s_emb = s_emb + self.pos_embed[:, 0:2*T:2, :]
+        a_emb = a_emb + self.pos_embed[:, 1:2*T:2, :]
         
         # Apply masking separately
         s_masked, s_mask, s_ids_restore = self.random_masking(s_emb, mask_ratio)
