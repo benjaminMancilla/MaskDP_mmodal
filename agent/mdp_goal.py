@@ -39,7 +39,7 @@ class MDP_MM_GoalAgent:
             self.config = payload["cfg"]
         else:
             self.config = transformer_cfg
-        self.mdp = MaskedDP(obs_shape[0], action_shape[0], self.config).to(device)
+        self.mdp = MaskedDPMultimodal(obs_shape[0], action_shape[0], self.config).to(device)
         print("number of parameters: %e", sum(p.numel() for p in self.mdp.parameters()))
         if path is not None:
             self.mdp.load_state_dict(payload["model"])

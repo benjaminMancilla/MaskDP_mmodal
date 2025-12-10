@@ -95,20 +95,20 @@ class MaskedDPMultimodal(nn.Module):
             nn.init.constant_(m.bias, 0)
             nn.init.constant_(m.weight, 1.0)
 
-    def random_masking(self, s_emb, a_emb, mask_ratio):
+    def random_masking(self, x, mask_ratio):
         """
         Perform per-sample random masking by per-sample shuffling.
         Per-sample shuffling is done by argsort random noise.
         x: [N, L, D], sequence
 
         Applies the same masking pattern for states and actions
-        to maintain temporal consistency
+        to maintain temporal consistency (concatenated sequence)
         """
-        N, L, D = s_emb.shape  # batch, length, dim
+        N, L, D = x.shape  # batch, length, dim
         len_keep = int(L * (1 - mask_ratio))
 
-        # Use the same noise for both modalities (if time t is masked, s_t AND a_t are too)
-        noise = torch.rand(N, L, device=s_emb.device)  # noise in [0, 1]
+        # noise independent between modalities
+        noise = torch.rand(N, L, device=x.device)  # noise in [0, 1]
 
         # sort noise for each sample
         ids_shuffle = torch.argsort(
@@ -120,16 +120,15 @@ class MaskedDPMultimodal(nn.Module):
         ids_keep = ids_shuffle[:, :len_keep]
 
         # Same pattern for s & a
-        s_masked = torch.gather(s_emb, dim=1, index=ids_keep.unsqueeze(-1).repeat(1, 1, D))
-        a_masked = torch.gather(a_emb, dim=1, index=ids_keep.unsqueeze(-1).repeat(1, 1, D))
+        x_masked = torch.gather(x, dim=1, index=ids_keep.unsqueeze(-1).repeat(1, 1, D))
 
         # generate the binary mask: 0 is keep, 1 is remove
-        mask = torch.ones([N, L], device=s_emb.device)
+        mask = torch.ones([N, L], device=x.device)
         mask[:, :len_keep] = 0
         # unshuffle to get the binary mask
         mask = torch.gather(mask, dim=1, index=ids_restore)
 
-        return s_masked, a_masked, mask, ids_restore
+        return x_masked, mask, ids_restore, ids_keep
 
     def forward_encoder(self, states, actions, mask_ratio):
         batch_size, T, obs_dim = states.size()
@@ -153,11 +152,49 @@ class MaskedDPMultimodal(nn.Module):
         # Actions are odd: 1, 3, 5, 7, ... (index a0, a1, a2, a3, ...)
         s_emb = s_emb + self.pos_embed[:, 0:2*T:2, :]
         a_emb = a_emb + self.pos_embed[:, 1:2*T:2, :]
+
+        # Interleave states and actions: [s0, a0, s1, a1, s2, a2, ...]
+        x = torch.stack([s_emb, a_emb], dim=2).reshape(batch_size, 2 * T, self.n_embd)
         
-        # Apply masking SHOULD NOT be separately
-        s_masked, a_masked, mask, ids_restore = self.random_masking(
-            s_emb, a_emb, mask_ratio
-        )
+        # Apply masking on the full interleaved sequence
+        x_masked, mask, ids_restore, ids_keep = self.random_masking(x, mask_ratio)
+
+        # Now separate the kept tokens into states and actions
+        # ids_keep[b, j] tells us the original index in [0, 2T-1]
+        # Even indices are states, odd indices are actions
+
+        # Determine which kept tokens are states vs actions based on their ORIGINAL indices
+        is_state = (ids_keep % 2) == 0  # [N, len_keep]
+        is_action = (ids_keep % 2) == 1  # [N, len_keep]
+        
+        # Extract state and action tokens
+        # We need to maintain batch processing, so we'll use masking
+        s_masked = []
+        a_masked = []
+        
+        for b in range(batch_size):
+            s_masked.append(x_masked[b, is_state[b]])  # [num_states_kept, D]
+            a_masked.append(x_masked[b, is_action[b]])  # [num_actions_kept, D]
+        
+        # Stack with padding to same length within batch
+        max_s_len = max(s.shape[0] for s in s_masked)
+        max_a_len = max(a.shape[0] for a in a_masked)
+        
+        if max_s_len > 0:
+            s_masked = torch.stack([
+                F.pad(s, (0, 0, 0, max_s_len - s.shape[0])) 
+                for s in s_masked
+            ])
+        else:
+            s_masked = torch.zeros(batch_size, 1, self.n_embd, device=x_masked.device)
+            
+        if max_a_len > 0:
+            a_masked = torch.stack([
+                F.pad(a, (0, 0, 0, max_a_len - a.shape[0])) 
+                for a in a_masked
+            ])
+        else:
+            a_masked = torch.zeros(batch_size, 1, self.n_embd, device=x_masked.device)
         
         # Process with separate encoders
         s_encoded = s_masked
@@ -170,34 +207,55 @@ class MaskedDPMultimodal(nn.Module):
             a_encoded = blk(a_encoded, self.attn_mask)
         a_encoded = self.action_encoder_norm(a_encoded)
         
-        return s_encoded, a_encoded, mask, ids_restore
+        # Return also ids_keep to track state/action positions
+        return s_encoded, a_encoded, mask, ids_restore, ids_keep
 
-    def forward_decoder(self, s_encoded, a_encoded, ids_restore):
-        # Append mask tokens (same number of state and actions)
-        s_mask_tokens = self.state_mask_token.repeat(
-            s_encoded.shape[0], ids_restore.shape[1] - s_encoded.shape[1], 1
+    def forward_decoder(self, s_encoded, a_encoded, ids_restore, ids_keep):
+
+        batch_size = s_encoded.shape[0]
+        total_len = ids_restore.shape[1]
+        len_keep = ids_keep.shape[1]
+
+        # Reconstruct x_masked in the same order as it came from random_masking
+        # by interleaving s_encoded and a_encoded based on ids_keep
+        
+        is_state = (ids_keep % 2) == 0  # [N, len_keep]
+        
+        # Build x_masked by placing each token in its correct position
+        x_masked = torch.zeros(batch_size, len_keep, self.n_embd, device=s_encoded.device)
+        
+        for b in range(batch_size):
+            state_mask_b = is_state[b]
+            action_mask_b = ~state_mask_b
+            
+            # Count how many states and actions we have for this batch element
+            num_s = state_mask_b.sum()
+            num_a = action_mask_b.sum()
+            
+            # Place state tokens
+            x_masked[b, state_mask_b] = s_encoded[b, :num_s]
+            # Place action tokens  
+            x_masked[b, action_mask_b] = a_encoded[b, :num_a]
+        
+        # Now we have x_masked in the correct order matching ids_keep
+        # Append mask tokens to reach total_len
+        mask_tokens = self.state_mask_token.repeat(
+            batch_size, total_len - len_keep, 1
         )
-        a_mask_tokens = self.action_mask_token.repeat(
-            a_encoded.shape[0], ids_restore.shape[1] - a_encoded.shape[1], 1
+        x_full = torch.cat([x_masked, mask_tokens], dim=1)  # [N, 2T, D]
+        
+        # Unshuffle using ids_restore to get back to interleaved [s0,a0,s1,a1,...]
+        x = torch.gather(
+            x_full, dim=1, index=ids_restore.unsqueeze(-1).repeat(1, 1, x_full.shape[2])
         )
         
-        # Unshuffle states and actions
-        s_full = torch.cat([s_encoded, s_mask_tokens], dim=1)
-        s_unshuffled = torch.gather(
-            s_full, dim=1, index=ids_restore.unsqueeze(-1).repeat(1, 1, s_full.shape[2])
-        )
-        
-        a_full = torch.cat([a_encoded, a_mask_tokens], dim=1)
-        a_unshuffled = torch.gather(
-            a_full, dim=1, index=ids_restore.unsqueeze(-1).repeat(1, 1, a_full.shape[2])
-        )
-        
-        # Project to decoder
-        s = self.decoder_state_embed(s_unshuffled)
-        a = self.decoder_action_embed(a_unshuffled)
+        # Now x is in interleaved order [s0, a0, s1, a1, ...]
+        # Project to decoder embedding space
+        s = self.decoder_state_embed(x[:, ::2])
+        a = self.decoder_action_embed(x[:, 1::2])
         
         # Interleave actions and states for the decoder
-        x = torch.stack([s, a], dim=2).reshape(s.shape[0], s.shape[1] * 2, s.shape[2])
+        x = torch.stack([s, a], dim=2).reshape(batch_size, total_len, self.n_embd)
         
         # Add positional embeddings
         x = x + self.decoder_pos_embed[:, :x.shape[1], :]
@@ -223,14 +281,21 @@ class MaskedDPMultimodal(nn.Module):
             var = target_s.var(dim=-1, keepdim=True)
             target_s = (target_s - mean) / (var + 1.0e-6) ** 0.5
 
+        # MSE per dimention
         loss_s = (pred_s - target_s) ** 2
         loss_a = (pred_a - target_a) ** 2
-        
-        # Separate mask losses
-        masked_loss_s = (loss_s.mean(dim=-1) * mask).sum() / mask.sum()
-        masked_loss_a = (loss_a.mean(dim=-1) * mask).sum() / mask.sum()
-        
-        masked_loss = masked_loss_s + masked_loss_a
+
+        # mean MSE per token 
+        loss_s_t = loss_s.mean(dim=-1)
+        loss_a_t = loss_a.mean(dim=-1)
+
+        # Intercalate [s0,a0,s1,a1,...] -> shape [B, 2T]
+        loss_tokens = torch.stack([loss_s_t, loss_a_t], dim=-1)  # [B, T, 2]
+        loss_tokens = loss_tokens.reshape(batch_size, 2 * T)     # [B, 2T]
+            
+        # Only ONE masked_loss for both modalities (same idea than the original)
+        masked_loss = (loss_tokens * mask).sum() / mask.sum()
+
         loss_s = loss_s.mean()
         loss_a = loss_a.mean()
         
@@ -276,12 +341,12 @@ class MaskedDPMultimodalAgent:
         mask_ratio = np.random.choice(self.mask_ratio)
         
         # Separate encoders
-        s_enc, a_enc, mask, ids_restore = \
+        s_enc, a_enc, mask, ids_restore, ids_keep = \
             self.model.forward_encoder(states, actions, mask_ratio)
         
         # Decoder
         pred_s, pred_a = self.model.forward_decoder(
-            s_enc, a_enc, ids_restore
+            s_enc, a_enc, ids_restore, ids_keep
         )
         
         # Loss
@@ -313,11 +378,11 @@ class MaskedDPMultimodalAgent:
         obs, action, _, _, _, _ = utils.to_torch(batch, self.device)
         
         mask_ratio = np.random.choice(self.mask_ratio)
-        s_enc, a_enc, mask, ids_restore = \
+        s_enc, a_enc, mask, ids_restore, ids_keep = \
             self.model.forward_encoder(obs, action, mask_ratio)
         
         pred_s, pred_a = self.model.forward_decoder(
-            s_enc, a_enc, ids_restore
+            s_enc, a_enc, ids_restore, ids_keep
         )
         
         mask_loss, state_loss, action_loss = self.model.forward_loss(
