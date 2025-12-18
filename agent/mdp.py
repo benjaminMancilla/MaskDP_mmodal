@@ -260,9 +260,22 @@ class MaskedDPMultimodal(nn.Module):
         
         # Now we have x_masked in the correct order matching ids_keep
         # Append mask tokens to reach total_len
-        mask_tokens = self.state_mask_token.repeat(
-            batch_size, total_len - len_keep, 1
-        )
+        n_mask = total_len - len_keep
+        if n_mask > 0:
+            # ids_shuffle rebuilds the order used in random_masking
+            ids_shuffle = torch.argsort(ids_restore, dim=1)          # [B, 2T]
+            ids_mask = ids_shuffle[:, len_keep:]                     # [B, n_mask]
+
+            # even -> state, odd -> action
+            is_mask_state = (ids_mask % 2) == 0                      # [B, n_mask]
+
+            state_tokens  = self.state_mask_token.expand(batch_size, n_mask, self.n_embd)
+            action_tokens = self.action_mask_token.expand(batch_size, n_mask, self.n_embd)
+
+            mask_tokens = torch.where(is_mask_state.unsqueeze(-1), state_tokens, action_tokens)
+        else:
+            mask_tokens = x_masked.new_empty(batch_size, 0, self.n_embd)
+
         x_full = torch.cat([x_masked, mask_tokens], dim=1)  # [N, 2T, D]
         
         # Unshuffle using ids_restore to get back to interleaved [s0,a0,s1,a1,...]
