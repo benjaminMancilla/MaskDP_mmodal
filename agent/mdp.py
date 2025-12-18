@@ -130,6 +130,29 @@ class MaskedDPMultimodal(nn.Module):
 
         return x_masked, mask, ids_restore, ids_keep
 
+    def build_blockdiag_pad_attn_mask(self, lengths: torch.Tensor, L: int) -> torch.Tensor:
+        """
+        lengths: [B] long, number of valid tokens (no-padding) per batch element
+        return: [B, 1, L, L] float mask with blocks:
+        - valid <-> valid
+        - padding <-> padding
+        - valid <-> padding blocked
+        - padding <-> valid blocked
+        """
+        # [L]
+        idx = torch.arange(L, device=lengths.device)
+        # [B, L]  True when a token is valid
+        valid = idx.unsqueeze(0) < lengths.unsqueeze(1)
+
+        # [B, L, L]
+        vv = valid.unsqueeze(2) & valid.unsqueeze(1)          # válido con válido
+        pp = (~valid).unsqueeze(2) & (~valid).unsqueeze(1)    # padding con padding
+
+        mask2d = (vv | pp)  # block diagonal
+
+        # [B, 1, L, L] float
+        return mask2d.unsqueeze(1).to(dtype=torch.float32)
+
     def forward_encoder(self, states, actions, mask_ratio):
         batch_size, T, obs_dim = states.size()
         
@@ -176,35 +199,33 @@ class MaskedDPMultimodal(nn.Module):
             s_masked.append(x_masked[b, is_state[b]])  # [num_states_kept, D]
             a_masked.append(x_masked[b, is_action[b]])  # [num_actions_kept, D]
         
+        s_lengths = torch.as_tensor([s.shape[0] for s in s_masked], device=x_masked.device, dtype=torch.long)
+        a_lengths = torch.as_tensor([a.shape[0] for a in a_masked], device=x_masked.device, dtype=torch.long)
+
         # Stack with padding to same length within batch
-        max_s_len = max(s.shape[0] for s in s_masked)
-        max_a_len = max(a.shape[0] for a in a_masked)
+        max_s_len = int(s_lengths.max().item()) if s_lengths.numel() > 0 else 0
+        max_a_len = int(a_lengths.max().item()) if a_lengths.numel() > 0 else 0
+
+        max_s_len = max(max_s_len, 1)
+        max_a_len = max(max_a_len, 1)
         
-        if max_s_len > 0:
-            s_masked = torch.stack([
-                F.pad(s, (0, 0, 0, max_s_len - s.shape[0])) 
-                for s in s_masked
-            ])
-        else:
-            s_masked = torch.zeros(batch_size, 1, self.n_embd, device=x_masked.device)
-            
-        if max_a_len > 0:
-            a_masked = torch.stack([
-                F.pad(a, (0, 0, 0, max_a_len - a.shape[0])) 
-                for a in a_masked
-            ])
-        else:
-            a_masked = torch.zeros(batch_size, 1, self.n_embd, device=x_masked.device)
+        # Padding [B, max_*_len, D]
+        s_masked = torch.stack([F.pad(s, (0, 0, 0, max_s_len - s.shape[0])) for s in s_masked])
+        a_masked = torch.stack([F.pad(a, (0, 0, 0, max_a_len - a.shape[0])) for a in a_masked])
+
+        # Blocking attention masks
+        s_attn_mask = self.build_blockdiag_pad_attn_mask(s_lengths, max_s_len)  # [B,1,Ls,Ls]
+        a_attn_mask = self.build_blockdiag_pad_attn_mask(a_lengths, max_a_len)  # [B,1,La,La]
         
         # Process with separate encoders
         s_encoded = s_masked
         for blk in self.state_encoder_blocks:
-            s_encoded = blk(s_encoded, self.attn_mask)
+            s_encoded = blk(s_encoded, s_attn_mask)
         s_encoded = self.state_encoder_norm(s_encoded)
         
         a_encoded = a_masked
         for blk in self.action_encoder_blocks:
-            a_encoded = blk(a_encoded, self.attn_mask)
+            a_encoded = blk(a_encoded, a_attn_mask)
         a_encoded = self.action_encoder_norm(a_encoded)
         
         # Return also ids_keep to track state/action positions
