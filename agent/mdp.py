@@ -145,8 +145,8 @@ class MaskedDPMultimodal(nn.Module):
         valid = idx.unsqueeze(0) < lengths.unsqueeze(1)
 
         # [B, L, L]
-        vv = valid.unsqueeze(2) & valid.unsqueeze(1)          # válido con válido
-        pp = (~valid).unsqueeze(2) & (~valid).unsqueeze(1)    # padding con padding
+        vv = valid.unsqueeze(2) & valid.unsqueeze(1)
+        pp = (~valid).unsqueeze(2) & (~valid).unsqueeze(1)
 
         mask2d = (vv | pp)  # block diagonal
 
