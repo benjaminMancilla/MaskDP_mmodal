@@ -72,7 +72,8 @@ def main(cfg):
     # create logger
     cfg.agent.obs_shape = env.observation_spec().shape
     cfg.agent.action_shape = env.action_spec().shape
-    exp_name = "_".join([cfg.agent.name, domain, str(cfg.seed)])
+    #exp_name = "_".join([cfg.agent.name, domain, str(cfg.seed)])
+    exp_name = str(cfg.exp_name)
     wandb_config = omegaconf.OmegaConf.to_container(
         cfg, resolve=True, throw_on_missing=True
     )
