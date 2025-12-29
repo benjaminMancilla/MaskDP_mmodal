@@ -203,8 +203,6 @@ class MaskedDPMultimodal(nn.Module):
             s_masked.append(x_masked[b, is_state[b]])  # [num_states_kept, D]
             a_masked.append(x_masked[b, is_action[b]])  # [num_actions_kept, D]
         
-        s_lengths = torch.as_tensor([s.shape[0] for s in s_masked], device=x_masked.device, dtype=torch.long)
-        a_lengths = torch.as_tensor([a.shape[0] for a in a_masked], device=x_masked.device, dtype=torch.long)
 
         # Pad to same length within batch using a sentinel value. (removing python for loops)
         s_masked = pad_sequence(s_masked, batch_first=True, padding_value=self.pad_value)  # [B, Ls, D]
@@ -213,13 +211,13 @@ class MaskedDPMultimodal(nn.Module):
         # 1D padding masks (True where padding)
         s_pad_mask_1d = (s_masked == self.pad_value).all(dim=-1)
         a_pad_mask_1d = (a_masked == self.pad_value).all(dim=-1)
-        
-        max_s_len = s_masked.size(1)
-        max_a_len = a_masked.size(1)
 
-        # Blocking attention masks
-        s_attn_mask = self.build_blockdiag_pad_attn_mask(s_lengths, max_s_len)  # [B,1,Ls,Ls]
-        a_attn_mask = self.build_blockdiag_pad_attn_mask(a_lengths, max_a_len)  # [B,1,La,La]
+        # Valid-only attention masks
+        # [B, L] -> [B, L, L] via outer-product of validity, then add head dim -> [B,1,L,L]
+        s_valid = ~s_pad_mask_1d
+        a_valid = ~a_pad_mask_1d
+        s_attn_mask = (s_valid.unsqueeze(2) & s_valid.unsqueeze(1)).unsqueeze(1).to(dtype=torch.float32)
+        a_attn_mask = (a_valid.unsqueeze(2) & a_valid.unsqueeze(1)).unsqueeze(1).to(dtype=torch.float32)
         
         # Process with separate encoders
         s_encoded = s_masked
