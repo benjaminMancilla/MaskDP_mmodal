@@ -192,7 +192,7 @@ class MaskedDPMultimodal(nn.Module):
 
         # Determine which kept tokens are states vs actions based on their ORIGINAL indices
         is_state = (ids_keep % 2) == 0  # [N, len_keep]
-        is_action = (ids_keep % 2) == 1  # [N, len_keep]
+        is_action = ~is_state  # [N, len_keep]
         
         # Extract state and action tokens
         # We need to maintain batch processing, so we'll use masking
@@ -242,23 +242,29 @@ class MaskedDPMultimodal(nn.Module):
         # Reconstruct x_masked in the same order as it came from random_masking
         # by interleaving s_encoded and a_encoded based on ids_keep
         
-        is_state = (ids_keep % 2) == 0  # [N, len_keep]
-        
-        # Build x_masked by placing each token in its correct position
-        x_masked = torch.zeros(batch_size, len_keep, self.n_embd, device=s_encoded.device)
-        
-        for b in range(batch_size):
-            state_mask_b = is_state[b]
-            action_mask_b = ~state_mask_b
-            
-            # Count how many states and actions we have for this batch element
-            num_s = state_mask_b.sum()
-            num_a = action_mask_b.sum()
-            
-            # Place state tokens
-            x_masked[b, state_mask_b] = s_encoded[b, :num_s]
-            # Place action tokens  
-            x_masked[b, action_mask_b] = a_encoded[b, :num_a]
+        is_state = (ids_keep % 2) == 0  # [B, len_keep]
+        is_action = ~is_state  # [B, len_keep]
+
+        # Map each slot to an index inside s_encoded / a_encoded.
+        s_idx = torch.cumsum(is_state.to(torch.long), dim=1) - 1  # [B, len_keep]
+        a_idx = torch.cumsum(is_action.to(torch.long), dim=1) - 1 # [B, len_keep]
+
+        # Clamp to keep gather indices in-range (unused positions will be ignored by torch.where).
+        s_idx = s_idx.clamp(min=0)
+        a_idx = a_idx.clamp(min=0)
+
+        # Gather candidate tokens. Handle edge-cases where Ls or La can be 0.
+        if s_encoded.size(1) > 0:
+            s_slots = s_encoded.gather(1, s_idx.unsqueeze(-1).expand(-1, -1, self.n_embd))
+        else:
+            s_slots = s_encoded.new_zeros(batch_size, len_keep, self.n_embd)
+
+        if a_encoded.size(1) > 0:
+            a_slots = a_encoded.gather(1, a_idx.unsqueeze(-1).expand(-1, -1, self.n_embd))
+        else:
+            a_slots = a_encoded.new_zeros(batch_size, len_keep, self.n_embd)
+
+        x_masked = torch.where(is_state.unsqueeze(-1), s_slots, a_slots)
         
         # Now we have x_masked in the correct order matching ids_keep
         # Append mask tokens to reach total_len
