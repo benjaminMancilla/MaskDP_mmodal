@@ -3,6 +3,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.nn.utils.rnn import pad_sequence
 from collections import OrderedDict
 
 import utils
@@ -14,6 +15,9 @@ from agent.modules.attention import Block, CausalSelfAttention
 class MaskedDPMultimodal(nn.Module):
     def __init__(self, obs_dim, action_dim, config):
         super().__init__()
+        # Padding sentinel (used for ragged state/action sequences within a batch)
+        # Prefer a value that will never appear in real embedded tokens.
+        self.pad_value = float(getattr(config, "pad_value", 1e9))
         # MAE encoder specifics
         self.n_embd = config.n_embd
         self.max_len = config.traj_length * 2
@@ -202,16 +206,16 @@ class MaskedDPMultimodal(nn.Module):
         s_lengths = torch.as_tensor([s.shape[0] for s in s_masked], device=x_masked.device, dtype=torch.long)
         a_lengths = torch.as_tensor([a.shape[0] for a in a_masked], device=x_masked.device, dtype=torch.long)
 
-        # Stack with padding to same length within batch
-        max_s_len = int(s_lengths.max().item()) if s_lengths.numel() > 0 else 0
-        max_a_len = int(a_lengths.max().item()) if a_lengths.numel() > 0 else 0
+        # Pad to same length within batch using a sentinel value. (removing python for loops)
+        s_masked = pad_sequence(s_masked, batch_first=True, padding_value=self.pad_value)  # [B, Ls, D]
+        a_masked = pad_sequence(a_masked, batch_first=True, padding_value=self.pad_value)  # [B, La, D]
 
-        max_s_len = max(max_s_len, 1)
-        max_a_len = max(max_a_len, 1)
+        # 1D padding masks (True where padding)
+        s_pad_mask_1d = (s_masked == self.pad_value).all(dim=-1)
+        a_pad_mask_1d = (a_masked == self.pad_value).all(dim=-1)
         
-        # Padding [B, max_*_len, D]
-        s_masked = torch.stack([F.pad(s, (0, 0, 0, max_s_len - s.shape[0])) for s in s_masked])
-        a_masked = torch.stack([F.pad(a, (0, 0, 0, max_a_len - a.shape[0])) for a in a_masked])
+        max_s_len = s_masked.size(1)
+        max_a_len = a_masked.size(1)
 
         # Blocking attention masks
         s_attn_mask = self.build_blockdiag_pad_attn_mask(s_lengths, max_s_len)  # [B,1,Ls,Ls]
