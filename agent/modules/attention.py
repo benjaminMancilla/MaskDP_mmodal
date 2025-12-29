@@ -61,8 +61,20 @@ class CausalSelfAttention(nn.Module):
 
         # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
         att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
-        att = att.masked_fill(mask[:, :, :T, :T] == 0, float("-inf"))
+        # slice + bool mask
+        mask = mask[:, :, :T, :T]
+        mask_bool = mask != 0
+
+        att = att.masked_fill(~mask_bool, float("-inf"))
+        # detect fully-masked query rows: [B, 1|nh, T, 1]
+        fully_masked = ~mask_bool.any(dim=-1, keepdim=True)
+        # replace fully-masked rows with zeros BEFORE softmax (prevents NaNs)
+        att = torch.where(fully_masked, torch.zeros_like(att), att)
+
+        # softmax + force masked positions to 0
         att = F.softmax(att, dim=-1)
+        att = att * mask_bool.to(dtype=att.dtype)
+
         att = self.attn_drop(att)
         y = att @ v  # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
         y = (
