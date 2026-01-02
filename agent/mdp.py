@@ -40,9 +40,8 @@ class MaskedDPMultimodal(nn.Module):
         self.state_encoder_norm = nn.LayerNorm(self.n_embd)
         self.action_encoder_norm = nn.LayerNorm(self.n_embd)
         
-        # Mask tokens for encoders
-        self.state_mask_token = nn.Parameter(torch.zeros(1, 1, self.n_embd))
-        self.action_mask_token = nn.Parameter(torch.zeros(1, 1, self.n_embd))
+        # Mask tokens for decoder
+        self.mask_token = nn.Parameter(torch.zeros(1, 1, self.n_embd))
         
         # --------------------------------------------------------------------------
         # MAE decoder specifics
@@ -84,8 +83,7 @@ class MaskedDPMultimodal(nn.Module):
         
         # timm's trunc_normal_(std=.02) is effectively normal_(std=0.02) as cutoff is too big (2.)
         # Init mask tokens
-        torch.nn.init.normal_(self.state_mask_token, std=0.02)
-        torch.nn.init.normal_(self.action_mask_token, std=0.02)
+        torch.nn.init.normal_(self.mask_token, std=0.02)
         
         self.apply(self._init_weights)
 
@@ -270,17 +268,7 @@ class MaskedDPMultimodal(nn.Module):
         # Append mask tokens to reach total_len
         n_mask = total_len - len_keep
         if n_mask > 0:
-            # ids_shuffle rebuilds the order used in random_masking
-            ids_shuffle = torch.argsort(ids_restore, dim=1)          # [B, 2T]
-            ids_mask = ids_shuffle[:, len_keep:]                     # [B, n_mask]
-
-            # even -> state, odd -> action
-            is_mask_state = (ids_mask % 2) == 0                      # [B, n_mask]
-
-            state_tokens  = self.state_mask_token.expand(batch_size, n_mask, self.n_embd)
-            action_tokens = self.action_mask_token.expand(batch_size, n_mask, self.n_embd)
-
-            mask_tokens = torch.where(is_mask_state.unsqueeze(-1), state_tokens, action_tokens)
+            mask_tokens = self.mask_token.expand(batch_size, n_mask, self.n_embd)
         else:
             mask_tokens = x_masked.new_empty(batch_size, 0, self.n_embd)
 
