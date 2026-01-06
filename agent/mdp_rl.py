@@ -9,7 +9,7 @@ import utils
 from dm_control.utils import rewards
 from einops import rearrange, reduce, repeat
 from agent.modules.attention import Block, CausalSelfAttention, mySequential
-from agent.mdp import MaskedDP
+from agent.mdp import MaskedDPMultimodal
 import math
 
 
@@ -19,7 +19,7 @@ class Actor(nn.Module):
         self.n_embd = config.n_embd
         self.max_len = attention_length
         print("attn length", self.max_len)
-        self.mdp = MaskedDP(obs_dim, action_dim, config)
+        self.mdp = MaskedDPMultimodal(obs_dim, action_dim, config)
         self.ln = nn.LayerNorm(self.n_embd)
         self.action_head = nn.Sequential(
             nn.Tanh(),

@@ -55,8 +55,7 @@ class MDP_MM_GoalAgent:
             self.mdp.decoder_pos_embed,
             self.mdp.decoder_state_embed,
             self.mdp.decoder_action_embed,
-            self.mdp.state_mask_token,
-            self.mdp.action_mask_token,
+            self.mdp.mask_token,
         ]
 
         if self.finetune == "decoder":
@@ -65,7 +64,11 @@ class MDP_MM_GoalAgent:
                 self.mdp.state_encoder_norm,
                 self.mdp.action_encoder_blocks, 
                 self.mdp.action_encoder_norm,
+                self.mdp.fusion_blocks,
+                self.mdp.fusion_norm,
             ]
+            if self.mdp.fusion_type_embed is not None:
+                frozen_layers.append(self.mdp.fusion_type_embed)
 
         if self.finetune == "linear":
             frozen_layers += [
@@ -122,13 +125,13 @@ class MDP_MM_GoalAgent:
         x = self.mdp.state_encoder_norm(x)
 
         if T > 1:
-            obs = self.mdp.state_mask_token.repeat(obs.shape[0], T + 1, 1)
+            obs = self.mdp.mask_token.repeat(obs.shape[0], T + 1, 1)
             obs[:, 0] = x[:, 0]
             obs[:, time_budgets] = x[:, 1:]
         else:
             obs = x
 
-        mask_actions = self.mdp.action_mask_token.repeat(obs.shape[0], T + 1, 1)
+        mask_actions = self.mdp.mask_token.repeat(obs.shape[0], T + 1, 1)
         obs = self.mdp.decoder_state_embed(obs)
         mask_actions = self.mdp.decoder_action_embed(mask_actions)
 
@@ -167,13 +170,13 @@ class MDP_MM_GoalAgent:
         x = self.mdp.state_encoder_norm(x)
 
         if T > 1:
-            mask_states = self.mdp.state_mask_token.repeat(obs.shape[0], T - 1, 1)
+            mask_states = self.mdp.mask_token.repeat(obs.shape[0], T - 1, 1)
             obs = torch.cat([x[:, 0].unsqueeze(1), mask_states], dim=1)
             obs = torch.cat([obs, x[:, -1].unsqueeze(1)], dim=1)
         else:
             obs = x
 
-        mask_actions = self.mdp.action_mask_token.repeat(obs.shape[0], T + 1, 1)
+        mask_actions = self.mdp.mask_token.repeat(obs.shape[0], T + 1, 1)
         obs = self.mdp.decoder_state_embed(obs)
         mask_actions = self.mdp.decoder_action_embed(mask_actions)
 

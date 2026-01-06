@@ -9,7 +9,7 @@ import utils
 from dm_control.utils import rewards
 from einops import rearrange, reduce, repeat
 from agent.modules.attention import Block, CausalSelfAttention
-from agent.mdp import MaskedDP
+from agent.mdp import MaskedDPMultimodal
 
 
 class MDPPromptAgent:
@@ -46,7 +46,7 @@ class MDPPromptAgent:
             self.config = payload["cfg"]
         else:
             self.config = transformer_cfg
-        self.mdp = MaskedDP(obs_shape[0], action_shape[0], self.config).to(device)
+        self.mdp = MaskedDPMultimodal(obs_shape[0], action_shape[0], self.config).to(device)
         print("number of parameters: %e", sum(p.numel() for p in self.mdp.parameters()))
         if path is not None:
             self.mdp.load_state_dict(payload["model"])

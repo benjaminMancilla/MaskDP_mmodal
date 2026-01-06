@@ -10,11 +10,14 @@ batch_size: 384 # Batch size Table 2
 mask_ratio: [0.15, 0.35, 0.55, 0.75, 0.95]
 transformer_cfg:
   # Hparams from paper (Table 2)
-  traj_length: 64           # context length
-  n_embd: 256               # hidden dim
-  n_head: 4                 # attention heads
-  n_enc_layer: 3            # encoder layers
-  n_dec_layer: 2            # decoder layers
+  traj_length: 64             # context length
+  n_embd: 256                 # hidden dim
+  n_head: 4                   # attention heads
+  n_enc_layer: 3              # encoder layers
+  n_dec_layer: 2              # decoder layers
+
+  n_fuse_layer: 2             # <- fusion encoder layers
+  use_fusion_type_embed: true # <- use fusion encoder bool (is optional)
 
   # This stays the same
   embd_pdrop: 0

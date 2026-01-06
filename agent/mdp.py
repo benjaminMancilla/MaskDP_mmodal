@@ -39,7 +39,24 @@ class MaskedDPMultimodal(nn.Module):
         # Normalization for encoders
         self.state_encoder_norm = nn.LayerNorm(self.n_embd)
         self.action_encoder_norm = nn.LayerNorm(self.n_embd)
-        
+
+        # --------------------------------------------------------------------------
+        # Fusion encoder (cross-modal interaction after separate encoders, before decoder)
+        self.n_fuse_layer = int(getattr(config, "n_fuse_layer", 0))
+
+        # Toggles modality/type embeddings (state vs action)
+        self.use_fusion_type_embed = bool(getattr(config, "use_fusion_type_embed", False))
+
+        # Categoric embedding with state and actions classes (Like A/B on BERT)
+        self.fusion_type_embed = nn.Embedding(2, self.n_embd) if self.use_fusion_type_embed else None
+
+        #Fusion Block
+        self.fusion_blocks = nn.ModuleList(
+            [Block(config) for _ in range(self.n_fuse_layer)]
+        )
+        self.fusion_norm = nn.LayerNorm(self.n_embd) if self.n_fuse_layer > 0 else nn.Identity()
+
+        # --------------------------------------------------------------------------
         # Mask tokens for decoder
         self.mask_token = nn.Parameter(torch.zeros(1, 1, self.n_embd))
         
@@ -84,6 +101,8 @@ class MaskedDPMultimodal(nn.Module):
         # timm's trunc_normal_(std=.02) is effectively normal_(std=0.02) as cutoff is too big (2.)
         # Init mask tokens
         torch.nn.init.normal_(self.mask_token, std=0.02)
+        if self.fusion_type_embed is not None:
+            torch.nn.init.normal_(self.fusion_type_embed.weight, std=0.02)
         
         self.apply(self._init_weights)
 
@@ -154,6 +173,67 @@ class MaskedDPMultimodal(nn.Module):
 
         # [B, 1, L, L] float
         return mask2d.unsqueeze(1).to(dtype=torch.float32)
+
+    # Auxiliary function to concatenate unmasked states and actions
+    def _combine_kept_tokens(self, s_tokens: torch.Tensor, a_tokens: torch.Tensor, ids_keep: torch.Tensor) -> torch.Tensor:
+        """Reconstruct the kept token sequence in `ids_keep` order by interleaving state/action streams.
+
+        Parity convention (from interleaving): even indices are states, odd indices are actions.
+
+        Args:
+            s_tokens: [B, Ls, D] encoded state tokens (padded along Ls)
+            a_tokens: [B, La, D] encoded action tokens (padded along La)
+            ids_keep: [B, len_keep] original indices of kept tokens in the interleaved sequence
+
+        Returns:
+            x_keep: [B, len_keep, D] kept tokens in ids_keep order
+        """
+        B, len_keep = ids_keep.shape
+        D = s_tokens.size(-1)
+
+        is_state = (ids_keep % 2) == 0  # [B, len_keep]
+        is_action = ~is_state
+
+        # Per-slot index into the (state/action) token lists
+        s_idx = torch.cumsum(is_state.to(torch.long), dim=1) - 1  # [B, len_keep]
+        a_idx = torch.cumsum(is_action.to(torch.long), dim=1) - 1  # [B, len_keep]
+        s_idx = s_idx.clamp(min=0)
+        a_idx = a_idx.clamp(min=0)
+
+        # Gather candidates. Unused candidates are ignored by torch.where.
+        if s_tokens.size(1) > 0:
+            s_slots = s_tokens.gather(1, s_idx.unsqueeze(-1).expand(-1, -1, D))
+        else:
+            s_slots = s_tokens.new_zeros(B, len_keep, D)
+
+        if a_tokens.size(1) > 0:
+            a_slots = a_tokens.gather(1, a_idx.unsqueeze(-1).expand(-1, -1, D))
+        else:
+            a_slots = a_tokens.new_zeros(B, len_keep, D)
+
+        x_keep = torch.where(is_state.unsqueeze(-1), s_slots, a_slots)  # [B, len_keep, D]
+        return x_keep
+
+    def forward_fusion(self, s_encoded: torch.Tensor, a_encoded: torch.Tensor, ids_keep: torch.Tensor) -> torch.Tensor:
+        """Optional fusion encoder over kept tokens (after separate state/action encoders).
+
+        If `n_fuse_layer == 0` and `use_fusion_type_embed == False`, this is effectively an identity mapping
+        (it just reconstructs the kept sequence in ids_keep order).
+        """
+        x = self._combine_kept_tokens(s_encoded, a_encoded, ids_keep)  # [B, len_keep, D]
+
+        if self.fusion_type_embed is not None:
+            type_ids = (ids_keep % 2).long()  # 0=state (even), 1=action (odd)
+            x = x + self.fusion_type_embed(type_ids)
+
+        if len(self.fusion_blocks) > 0:
+            B, L, _ = x.shape
+            fuse_mask = torch.ones(B, 1, L, L, device=x.device, dtype=torch.float32)
+            for blk in self.fusion_blocks:
+                x = blk(x, fuse_mask)
+            x = self.fusion_norm(x)
+
+        return x
 
     def forward_encoder(self, states, actions, mask_ratio):
         batch_size, T, obs_dim = states.size()
@@ -228,58 +308,40 @@ class MaskedDPMultimodal(nn.Module):
             a_encoded = blk(a_encoded, a_attn_mask)
         a_encoded = self.action_encoder_norm(a_encoded)
         
+        # Fuse and return kept tokens for the decoder
+        x_fused = self.forward_fusion(s_encoded, a_encoded, ids_keep)
+        
         # Return also ids_keep to track state/action positions
-        return s_encoded, a_encoded, mask, ids_restore, ids_keep
+        return x_fused, mask, ids_restore, ids_keep
 
-    def forward_decoder(self, s_encoded, a_encoded, ids_restore, ids_keep):
+    def forward_decoder(self, x_fused: torch.Tensor, ids_restore: torch.Tensor):
+        """MAE-style decoder.
+        Args:
+            x_fused: [B, len_keep, D] kept tokens in ids_keep / ids_shuffle-kept order (post-fusion)
+            ids_restore: [B, total_len] indices to restore original interleaved order
+        Returns:
+            s_pred: [B, T, obs_dim]
+            a_pred: [B, T, action_dim]
+        """
 
-        batch_size = s_encoded.shape[0]
+        batch_size = x_fused.shape[0]
         total_len = ids_restore.shape[1]
-        len_keep = ids_keep.shape[1]
+        len_keep = x_fused.shape[1]
 
-        # Reconstruct x_masked in the same order as it came from random_masking
-        # by interleaving s_encoded and a_encoded based on ids_keep
-        
-        is_state = (ids_keep % 2) == 0  # [B, len_keep]
-        is_action = ~is_state  # [B, len_keep]
-
-        # Map each slot to an index inside s_encoded / a_encoded.
-        s_idx = torch.cumsum(is_state.to(torch.long), dim=1) - 1  # [B, len_keep]
-        a_idx = torch.cumsum(is_action.to(torch.long), dim=1) - 1 # [B, len_keep]
-
-        # Clamp to keep gather indices in-range (unused positions will be ignored by torch.where).
-        s_idx = s_idx.clamp(min=0)
-        a_idx = a_idx.clamp(min=0)
-
-        # Gather candidate tokens. Handle edge-cases where Ls or La can be 0.
-        if s_encoded.size(1) > 0:
-            s_slots = s_encoded.gather(1, s_idx.unsqueeze(-1).expand(-1, -1, self.n_embd))
-        else:
-            s_slots = s_encoded.new_zeros(batch_size, len_keep, self.n_embd)
-
-        if a_encoded.size(1) > 0:
-            a_slots = a_encoded.gather(1, a_idx.unsqueeze(-1).expand(-1, -1, self.n_embd))
-        else:
-            a_slots = a_encoded.new_zeros(batch_size, len_keep, self.n_embd)
-
-        x_masked = torch.where(is_state.unsqueeze(-1), s_slots, a_slots)
-        
-        # Now we have x_masked in the correct order matching ids_keep
         # Append mask tokens to reach total_len
         n_mask = total_len - len_keep
         if n_mask > 0:
             mask_tokens = self.mask_token.expand(batch_size, n_mask, self.n_embd)
         else:
-            mask_tokens = x_masked.new_empty(batch_size, 0, self.n_embd)
+            mask_tokens = x_fused.new_empty(batch_size, 0, self.n_embd)
 
-        x_full = torch.cat([x_masked, mask_tokens], dim=1)  # [N, 2T, D]
+        x_full = torch.cat([x_fused, mask_tokens], dim=1)  # [B, total_len, D]
         
         # Unshuffle using ids_restore to get back to interleaved [s0,a0,s1,a1,...]
         x = torch.gather(
             x_full, dim=1, index=ids_restore.unsqueeze(-1).repeat(1, 1, x_full.shape[2])
         )
         
-        # Now x is in interleaved order [s0, a0, s1, a1, ...]
         # Project to decoder embedding space
         s = self.decoder_state_embed(x[:, ::2])
         a = self.decoder_action_embed(x[:, 1::2])
@@ -370,13 +432,13 @@ class MaskedDPMultimodalAgent:
         metrics = dict()
         mask_ratio = np.random.choice(self.mask_ratio)
         
-        # Separate encoders
-        s_enc, a_enc, mask, ids_restore, ids_keep = \
+        # Encoder (dual + optional fusion)
+        x_fused, mask, ids_restore, ids_keep = \
             self.model.forward_encoder(states, actions, mask_ratio)
         
         # Decoder
         pred_s, pred_a = self.model.forward_decoder(
-            s_enc, a_enc, ids_restore, ids_keep
+            x_fused, ids_restore
         )
         
         # Loss
@@ -408,11 +470,11 @@ class MaskedDPMultimodalAgent:
         obs, action, _, _, _, _ = utils.to_torch(batch, self.device)
         
         mask_ratio = np.random.choice(self.mask_ratio)
-        s_enc, a_enc, mask, ids_restore, ids_keep = \
+        x_fused, mask, ids_restore, ids_keep = \
             self.model.forward_encoder(obs, action, mask_ratio)
         
         pred_s, pred_a = self.model.forward_decoder(
-            s_enc, a_enc, ids_restore, ids_keep
+            x_fused, ids_restore
         )
         
         mask_loss, state_loss, action_loss = self.model.forward_loss(

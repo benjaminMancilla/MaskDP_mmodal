@@ -13,7 +13,7 @@ log_every_steps: 1000
 eval_every_steps: 10000
 num_eval_episodes: 10
 # snapshot
-snapshots: [0, 100000, 150000, 200000, 250000, 300000, 350000, 400000, 450000, 500000, 550000, 600000]
+snapshots: [0, 50000, 100000, 150000, 200000, 250000, 300000, 350000, 400000, 450000, 500000, 550000, 600000]
 snapshot_dir: /home/bmancilla/archive/maskdp_snapshots
 # resume
 resume: false
@@ -33,7 +33,7 @@ use_tb: true
 use_wandb: true
 project: maskdp-mm
 notes: "pretrain-full cheetah mm"
-exp_name: pretrain_full_mm_${task}
+exp_name: fusion_1(llaima)
 
 hydra:
   run:
