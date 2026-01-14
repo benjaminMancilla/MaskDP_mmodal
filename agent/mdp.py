@@ -406,12 +406,16 @@ class MaskedDPMultimodalAgent:
         use_tb,
         mask_ratio,
         transformer_cfg,
+        freeze_schedule=None,
     ):
         self.action_dim = action_shape[0]
         self.lr = lr
         self.device = device
         self.use_tb = use_tb
         self.config = transformer_cfg
+        
+        # Schedule {'module_nane': [start_step, end_step]}
+        self.freeze_schedule = freeze_schedule if freeze_schedule is not None else {}
 
         # models
         self.model = MaskedDPMultimodal(obs_shape[0], action_shape[0], transformer_cfg).to(device)
@@ -423,12 +427,47 @@ class MaskedDPMultimodalAgent:
         )
 
         self.train()
+        
+    def set_module_requires_grad(self, module, requires_grad):
+        for param in module.parameters():
+            param.requires_grad = requires_grad
+            
+    def _rebuild_optimizer(self):
+        """Rebuild optimizer with only trainable parameters"""
+        trainable_params = [p for p in self.model.parameters() if p.requires_grad]
+        print(f"Rebuilding optimizer with {len(trainable_params)} trainable parameter groups")
+        self.opt = torch.optim.Adam(trainable_params, lr=self.lr)
+            
+    def check_freeze_schedule(self, step):
+        """Applies freezing to a block if step is inside an interval [start, end)"""
+        if step is None:
+            return
+        
+        needs_optimizer_rebuild = False
+
+        for module_name, (start_step, end_step) in self.freeze_schedule.items():
+            module = getattr(self.model, module_name, None)
+            if module is None:
+                continue
+            
+            should_train = not (start_step <= step < end_step)
+            current_status = next(module.parameters()).requires_grad
+            
+            if should_train != current_status:
+                status = "TRAINABLE" if should_train else "FROZEN"
+                print(f"[{step}] Module '{module_name}' -> {status} (interval: [{start_step}, {end_step}))")
+                self.set_module_requires_grad(module, should_train)
+                needs_optimizer_rebuild = True
+                
+        if needs_optimizer_rebuild:
+            self._rebuild_optimizer()
 
     def train(self, training=True):
         self.training = training
         self.model.train(training)
 
-    def update_mdp(self, states, actions):
+    def update_mdp(self, states, actions, step=None):
+        self.check_freeze_schedule(step)
         metrics = dict()
         mask_ratio = np.random.choice(self.mask_ratio)
         
@@ -495,6 +534,6 @@ class MaskedDPMultimodalAgent:
         obs, action, _, _, _, _ = utils.to_torch(batch, self.device)
 
         # update critic
-        metrics.update(self.update_mdp(obs, action))
+        metrics.update(self.update_mdp(obs, action, step=step))
 
         return metrics

@@ -13,11 +13,11 @@ transformer_cfg:
   traj_length: 64             # context length
   n_embd: 256                 # hidden dim
   n_head: 4                   # attention heads
-  n_enc_layer: 3              # encoder layers
+  n_enc_layer: 2              # encoder layers
   n_dec_layer: 2              # decoder layers
 
-  n_fuse_layer: 2             # <- fusion encoder layers
-  use_fusion_type_embed: true # <- use fusion encoder bool (is optional)
+  n_fuse_layer: 1             # fusion encoder layers
+  use_fusion_type_embed: true # use fusion encoder bool (is optional)
 
   # This stays the same
   embd_pdrop: 0
@@ -26,3 +26,11 @@ transformer_cfg:
   pe: 'fixed'
   loss: 'total'
   norm: 'l2'
+
+freeze_schedule: {}
+
+# freeze_schedule:
+#   state_encoder_blocks:  [200000, 400000]
+#   action_encoder_blocks: [200000, 400000]
+#   fusion_blocks:         [0     , 200000]
+#   # decoder_blocks:      [0     , 150000]
