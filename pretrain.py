@@ -41,6 +41,101 @@ def get_domain(task):
 def get_data_seed(seed, num_data_seeds):
     return (seed - 1) % num_data_seeds + 1
 
+def create_goal_agent_from_snapshot(pretrain_agent, device, cfg):
+    """Crea un agente goal-conditioned cargando los pesos del agente de pretrain"""
+    import agent.mdp_goal as mdp_goal_module
+    
+    goal_agent = mdp_goal_module.MDP_MM_GoalAgent(
+        name="mdp_mm_goal",
+        obs_shape=cfg.agent.obs_shape,
+        action_shape=cfg.agent.action_shape,
+        device=device,
+        lr=cfg.agent.lr,
+        batch_size=cfg.agent.batch_size,
+        use_tb=cfg.use_tb,
+        finetune='decoder',
+        transformer_cfg=pretrain_agent.config,
+        path=None,
+    )
+    
+    # Copy weights from pretrain agent
+    goal_agent.mdp.load_state_dict(pretrain_agent.model.state_dict())
+    for param in goal_agent.mdp.parameters():
+        param.requires_grad = False
+    goal_agent.train(training=False)
+    
+    return goal_agent
+
+def eval_goal_reaching(
+    global_step,
+    goal_agent,
+    env,
+    logger,
+    goal_iter,
+    device,
+    num_eval_episodes,
+    video_recorder,
+    replan=False,
+):
+    """Evaluate goal-reaching performance (MDP style)"""
+    step, episode, total_dist2goal = 0, 0, []
+    eval_until_episode = utils.Until(num_eval_episodes)
+    batch = next(goal_iter)
+    start_obs, start_physics, goal_obs, goal_physics, timestep = utils.to_torch(
+        batch, device
+    )
+
+    while eval_until_episode(episode):
+        time_step = env.reset()
+        with env.physics.reset_context():
+            env.physics.set_state(start_physics[episode].cpu())
+        dist2goal = 1e6
+        video_recorder.init(env, enabled=False)
+        
+        if replan is False:
+            # Open-loop
+            with torch.no_grad(), utils.eval_mode(goal_agent):
+                actions = goal_agent.act(
+                    start_obs[episode].unsqueeze(0),
+                    goal_obs[episode].unsqueeze(0),
+                    timestep[episode],
+                )
+
+            for a in actions:
+                time_step = env.step(a)
+                step += 1
+                dist = np.linalg.norm(
+                    time_step.observation - goal_obs[episode].cpu().numpy()
+                )
+                dist2goal = min(dist2goal, dist)
+        else:
+            # Closed-loop (replan)
+            obs = start_obs[episode]
+            for t in range(timestep[episode]):
+                with torch.no_grad(), utils.eval_mode(goal_agent):
+                    action = goal_agent.act(
+                        obs.unsqueeze(0),
+                        goal_obs[episode].unsqueeze(0),
+                        timestep[episode] - t,
+                    )[0, ...]
+                time_step = env.step(action)
+                obs = np.asarray(time_step.observation)
+                obs = torch.as_tensor(obs, device=device)
+                dist = np.linalg.norm(
+                    time_step.observation - goal_obs[episode].cpu().numpy()
+                )
+                dist2goal = min(dist2goal, dist)
+                step += 1
+        
+        episode += 1
+        total_dist2goal.append(dist2goal)
+
+    return {
+        "distance2goal": np.mean(total_dist2goal),
+        "std": np.std(total_dist2goal),
+        "episode_length": step / episode,
+    }
+
 
 @hydra.main(config_path=".", config_name="pretrain_full")
 def main(cfg):
@@ -90,6 +185,7 @@ def main(cfg):
     )
     logger = Logger(work_dir, use_tb=cfg.use_tb, use_wandb=cfg.use_wandb)
 
+    # Create TRAIN replay loader
     replay_train_dir = Path(cfg.replay_buffer_dir) / domain
     print(f"replay dir: {replay_train_dir}")
     train_loader = make_replay_loader(
@@ -104,10 +200,33 @@ def main(cfg):
         relabel=False,
     )
     train_iter = iter(train_loader)
-    # create video recorders
-
+    
+    # Create GOAL evaluation loader
+    goal_iter = None
+    video_recorder = None
+    if hasattr(cfg, 'goal_buffer_dir') and cfg.goal_buffer_dir is not None:
+        goal_dir = Path(cfg.goal_buffer_dir) / cfg.task
+        if goal_dir.exists():
+            print(f"goal evaluation dir: {goal_dir}")
+            goal_loader = make_replay_loader(
+                env,
+                goal_dir,
+                cfg.goal_buffer_size,
+                cfg.num_goal_eval_episodes,
+                cfg.goal_buffer_num_workers,
+                cfg.discount,
+                domain=domain,
+                traj_length=1,
+                mode="goal",
+                cfg=cfg.agent.transformer_cfg,
+                relabel=False,
+            )
+            goal_iter = iter(goal_loader)
+            video_recorder = VideoRecorder(work_dir if cfg.save_video else None)
+        else:
+            print(f"Warning: Goal dir {goal_dir} not found. Skipping goal evaluation.")
+            
     timer = utils.Timer()
-
     global_step = cfg.resume_step
 
     train_until_step = utils.Until(cfg.num_grad_steps)
@@ -115,9 +234,61 @@ def main(cfg):
     log_every_step = utils.Every(cfg.log_every_steps)
 
     while train_until_step(global_step):
-        # try to evaluate
+        # Training step
         metrics = agent.update(train_iter, global_step)
         logger.log_metrics(metrics, global_step, ty="train")
+        
+        # Goal-reaching evaluation
+        if goal_iter is not None and eval_every_step(global_step):
+            print(f"[{global_step}] Running goal-reaching evaluation...")
+            
+            # Crear agente goal temporal con los pesos actuales del pretrain
+            goal_agent = create_goal_agent_from_snapshot(agent, device, cfg)
+            
+            # Evaluate open-loop (replan=False)
+            with torch.no_grad():
+                metrics_openloop = eval_goal_reaching(
+                    global_step,
+                    goal_agent,  # Usar goal_agent, no agent
+                    env,
+                    logger,
+                    goal_iter,
+                    device,
+                    cfg.num_goal_eval_episodes,
+                    video_recorder,
+                    replan=False,
+                )
+            
+            # Log open-loop metrics
+            for key, value in metrics_openloop.items():
+                logger.log_metrics({f"goal_openloop/{key}": value}, global_step, ty="eval")
+            
+            # Evaluate closed-loop (replan=True)
+            with torch.no_grad():
+                metrics_replan = eval_goal_reaching(
+                    global_step,
+                    goal_agent,  # Usar goal_agent, no agent
+                    env,
+                    logger,
+                    goal_iter,
+                    device,
+                    cfg.num_goal_eval_episodes,
+                    video_recorder,
+                    replan=True,
+                )
+            
+            # Log closed-loop metrics
+            for key, value in metrics_replan.items():
+                logger.log_metrics({f"goal_replan/{key}": value}, global_step, ty="eval")
+                
+            logger.dump(global_step, ty="eval")
+            
+            # Limpiar memoria
+            del goal_agent
+            torch.cuda.empty_cache()
+            
+            agent.train(training=True)
+
         if log_every_step(global_step):
             elapsed_time, total_time = timer.reset()
             with logger.log_and_dump_ctx(global_step, ty="train") as log:
