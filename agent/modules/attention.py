@@ -60,7 +60,10 @@ class CrossAttention(nn.Module):
             # Expand mask for broadcasting: [B, 1, 1, T_ctx]
             mask = key_padding_mask.unsqueeze(1).unsqueeze(2)
             att = att.masked_fill(mask, float("-inf"))
+            fully_masked = mask.all(dim=-1, keepdim=True)
+            att = torch.where(fully_masked, torch.zeros_like(att), att)
             att = F.softmax(att, dim=-1)
+            att = att.masked_fill(mask, 0.0)
         else:
             att = F.softmax(att, dim=-1)
         
