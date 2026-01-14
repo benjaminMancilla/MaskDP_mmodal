@@ -105,9 +105,13 @@ class CoAttentionBlock(nn.Module):
         )
 
     def forward(self, x_s, x_a, mask_s=None, mask_a=None):
+        # Parallel Co-Attention between x_s and x_a
+        delta_s = self.cross_attn_s(self.ln1_s(x_s), self.ln1_a(x_a), key_padding_mask=mask_a)
+        delta_a = self.cross_attn_a(self.ln1_a(x_a), self.ln1_s(x_s), key_padding_mask=mask_s)
+        
         # Cross Attention (residual connection)
-        x_s = x_s + self.cross_attn_s(self.ln1_s(x_s), self.ln1_a(x_a), key_padding_mask=mask_a)
-        x_a = x_a + self.cross_attn_a(self.ln1_a(x_a), self.ln1_s(x_s), key_padding_mask=mask_s)
+        x_s = x_s + delta_s
+        x_a = x_a + delta_a
 
         # Feed Forward
         x_s = x_s + self.mlp_s(self.ln2_s(x_s))
