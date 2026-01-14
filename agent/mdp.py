@@ -9,7 +9,7 @@ from collections import OrderedDict
 import utils
 from dm_control.utils import rewards
 from einops import rearrange, reduce, repeat
-from agent.modules.attention import Block, CausalSelfAttention
+from agent.modules.attention import Block, CausalSelfAttention, CoAttentionBlock
 
 
 class MaskedDPMultimodal(nn.Module):
@@ -51,9 +51,16 @@ class MaskedDPMultimodal(nn.Module):
         self.fusion_type_embed = nn.Embedding(2, self.n_embd) if self.use_fusion_type_embed else None
 
         #Fusion Block
-        self.fusion_blocks = nn.ModuleList(
-            [Block(config) for _ in range(self.n_fuse_layer)]
-        )
+        self.fusion_type = getattr(config, "fusion_type", "self")
+        # 'cross' for co-attention, 'self' for self-attention
+        if self.fusion_type == 'cross':
+            self.fusion_blocks = nn.ModuleList(
+                [CoAttentionBlock(config) for _ in range(self.n_fuse_layer)]
+            )
+        else:
+            self.fusion_blocks = nn.ModuleList(
+                [Block(config) for _ in range(self.n_fuse_layer)]
+            )
         self.fusion_norm = nn.LayerNorm(self.n_embd) if self.n_fuse_layer > 0 else nn.Identity()
 
         # --------------------------------------------------------------------------
@@ -107,14 +114,28 @@ class MaskedDPMultimodal(nn.Module):
         self.apply(self._init_weights)
         
         # Initialize FUSION with zeros to stabilize freezing training
+        # The initialization procedures depends on the fusion type
         for blk in self.fusion_blocks:
-            # Zero-init Attention Output Projection
-            nn.init.zeros_(blk.attn.proj.weight)
-            nn.init.zeros_(blk.attn.proj.bias)
+            if isinstance(blk, CoAttentionBlock):
+                # Init Stream S
+                nn.init.zeros_(blk.cross_attn_s.proj.weight)
+                nn.init.zeros_(blk.cross_attn_s.proj.bias)
+                nn.init.zeros_(blk.mlp_s[2].weight)
+                nn.init.zeros_(blk.mlp_s[2].bias)
 
-            # Zero-init MLP Output Projection
-            nn.init.zeros_(blk.mlp[2].weight)
-            nn.init.zeros_(blk.mlp[2].bias)
+                # Init Stream A
+                nn.init.zeros_(blk.cross_attn_a.proj.weight)
+                nn.init.zeros_(blk.cross_attn_a.proj.bias)
+                nn.init.zeros_(blk.mlp_a[2].weight)
+                nn.init.zeros_(blk.mlp_a[2].bias)
+            else:
+                # Zero-init Attention Output Projection
+                nn.init.zeros_(blk.attn.proj.weight)
+                nn.init.zeros_(blk.attn.proj.bias)
+
+                # Zero-init MLP Output Projection
+                nn.init.zeros_(blk.mlp[2].weight)
+                nn.init.zeros_(blk.mlp[2].bias)
 
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
@@ -229,21 +250,50 @@ class MaskedDPMultimodal(nn.Module):
 
         If `n_fuse_layer == 0` and `use_fusion_type_embed == False`, this is effectively an identity mapping
         (it just reconstructs the kept sequence in ids_keep order).
+        
+        Multimodal fusion is done via either self-attention or co-attention blocks.
         """
-        x = self._combine_kept_tokens(s_encoded, a_encoded, ids_keep)  # [B, len_keep, D]
+ 
+        # --- CROSS ATTENTION ---       
+        if self.fusion_type == 'cross':
+            x_s = s_encoded
+            x_a = a_encoded
 
-        if self.fusion_type_embed is not None:
-            type_ids = (ids_keep % 2).long()  # 0=state (even), 1=action (odd)
-            x = x + self.fusion_type_embed(type_ids)
+            if self.fusion_type_embed is not None:
+                B, L_s, _ = x_s.shape
+                B, L_a, _ = x_a.shape
 
-        if len(self.fusion_blocks) > 0:
-            B, L, _ = x.shape
-            fuse_mask = torch.ones(B, 1, L, L, device=x.device, dtype=torch.float32)
+                # 0 states, 1 actions
+                type_ids_s = torch.zeros(B, L_s, dtype=torch.long, device=x_s.device)
+                type_ids_a = torch.ones(B, L_a, dtype=torch.long, device=x_a.device)
+                
+                x_s = x_s + self.fusion_type_embed(type_ids_s)
+                x_a = x_a + self.fusion_type_embed(type_ids_a)
+
             for blk in self.fusion_blocks:
-                x = blk(x, fuse_mask)
+                x_s, x_a = blk(x_s, x_a)
+
+            x = self._combine_kept_tokens(x_s, x_a, ids_keep)
             x = self.fusion_norm(x)
 
-        return x
+            return x
+
+        # --- SELF ATTENTION ---
+        else:
+            x = self._combine_kept_tokens(s_encoded, a_encoded, ids_keep)  # [B, len_keep, D]
+
+            if self.fusion_type_embed is not None:
+                type_ids = (ids_keep % 2).long()  # 0=state (even), 1=action (odd)
+                x = x + self.fusion_type_embed(type_ids)
+
+            if len(self.fusion_blocks) > 0:
+                B, L, _ = x.shape
+                fuse_mask = torch.ones(B, 1, L, L, device=x.device, dtype=torch.float32)
+                for blk in self.fusion_blocks:
+                    x = blk(x, fuse_mask)
+                x = self.fusion_norm(x)
+
+            return x
 
     def forward_encoder(self, states, actions, mask_ratio):
         batch_size, T, obs_dim = states.size()

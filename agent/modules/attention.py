@@ -17,6 +17,88 @@ class mySequential(nn.Sequential):
                 raise NotImplementedError
                 # inputs = module(inputs)
         return inputs
+    
+class CrossAttention(nn.Module):
+    """
+    Simple Generic CrossAttention (based on LXMERT). 
+    x: source query
+    context: source of Key/Value
+    Without causal masking.
+    """
+    def __init__(self, config):
+        super().__init__()
+        assert config.n_embd % config.n_head == 0
+        self.n_head = config.n_head
+        self.n_embd = config.n_embd
+        
+        self.key = nn.Linear(config.n_embd, config.n_embd)
+        self.query = nn.Linear(config.n_embd, config.n_embd)
+        self.value = nn.Linear(config.n_embd, config.n_embd)
+        
+        self.attn_drop = nn.Dropout(config.attn_pdrop)
+        self.resid_drop = nn.Dropout(config.resid_pdrop)
+        self.proj = nn.Linear(config.n_embd, config.n_embd)
+
+    def forward(self, x, context):
+        B, T_x, C = x.size()
+        B, T_ctx, _ = context.size()
+
+        # compute querys, keys and values
+        q = self.query(x).view(B, T_x, self.n_head, C // self.n_head).transpose(1, 2)
+        k = self.key(context).view(B, T_ctx, self.n_head, C // self.n_head).transpose(1, 2)
+        v = self.value(context).view(B, T_ctx, self.n_head, C // self.n_head).transpose(1, 2)
+
+        # Attention (B, nh, T_x, T_ctx)
+        att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
+        
+        att = F.softmax(att, dim=-1)
+        att = self.attn_drop(att)
+        
+        y = att @ v 
+        y = y.transpose(1, 2).contiguous().view(B, T_x, C)
+        
+        y = self.resid_drop(self.proj(y))
+        return y
+
+
+class CoAttentionBlock(nn.Module):
+    """
+    Co-Attentional (ViLBERT style simplified).
+    """
+    def __init__(self, config):
+        super().__init__()
+        # Stream 1 (ex. States)
+        self.ln1_s = nn.LayerNorm(config.n_embd)
+        self.cross_attn_s = CrossAttention(config) # Q=S, K/V=A
+        self.ln2_s = nn.LayerNorm(config.n_embd)
+        self.mlp_s = nn.Sequential(
+            nn.Linear(config.n_embd, 4 * config.n_embd),
+            nn.GELU(),
+            nn.Linear(4 * config.n_embd, config.n_embd),
+            nn.Dropout(config.resid_pdrop),
+        )
+
+        # Stream 2 (ex. Actions)
+        self.ln1_a = nn.LayerNorm(config.n_embd)
+        self.cross_attn_a = CrossAttention(config) # Q=A, K/V=S
+        self.ln2_a = nn.LayerNorm(config.n_embd)
+        self.mlp_a = nn.Sequential(
+            nn.Linear(config.n_embd, 4 * config.n_embd),
+            nn.GELU(),
+            nn.Linear(4 * config.n_embd, config.n_embd),
+            nn.Dropout(config.resid_pdrop),
+        )
+
+    def forward(self, x_s, x_a):
+        # Cross Attention (residual connection)
+        x_s = x_s + self.cross_attn_s(self.ln1_s(x_s), self.ln1_a(x_a))
+        x_a = x_a + self.cross_attn_a(self.ln1_a(x_a), self.ln1_s(x_s))
+        
+        # Feed Forward
+        x_s = x_s + self.mlp_s(self.ln2_s(x_s))
+        x_a = x_a + self.mlp_a(self.ln2_a(x_a))
+        
+        return x_s, x_a
 
 
 class CausalSelfAttention(nn.Module):

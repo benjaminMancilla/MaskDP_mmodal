@@ -18,6 +18,7 @@ transformer_cfg:
 
   n_fuse_layer: 1             # fusion encoder layers
   use_fusion_type_embed: true # use fusion encoder bool (is optional)
+  fusion_type: 'cross' # 'self' | 'cross' # fusion encoder type
 
   # This stays the same
   embd_pdrop: 0
