@@ -105,6 +105,16 @@ class MaskedDPMultimodal(nn.Module):
             torch.nn.init.normal_(self.fusion_type_embed.weight, std=0.02)
         
         self.apply(self._init_weights)
+        
+        # Initialize FUSION with zeros to stabilize freezing training
+        for blk in self.fusion_blocks:
+            # Zero-init Attention Output Projection
+            nn.init.zeros_(blk.attn.proj.weight)
+            nn.init.zeros_(blk.attn.proj.bias)
+
+            # Zero-init MLP Output Projection
+            nn.init.zeros_(blk.mlp[2].weight)
+            nn.init.zeros_(blk.mlp[2].bias)
 
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
