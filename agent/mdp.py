@@ -245,7 +245,14 @@ class MaskedDPMultimodal(nn.Module):
         x_keep = torch.where(is_state.unsqueeze(-1), s_slots, a_slots)  # [B, len_keep, D]
         return x_keep
 
-    def forward_fusion(self, s_encoded: torch.Tensor, a_encoded: torch.Tensor, ids_keep: torch.Tensor) -> torch.Tensor:
+    def forward_fusion(
+        self, 
+        s_encoded: torch.Tensor, 
+        a_encoded: torch.Tensor, 
+        ids_keep: torch.Tensor,
+        s_pad_mask=None, 
+        a_pad_mask=None,
+    ) -> torch.Tensor:
         """Optional fusion encoder over kept tokens (after separate state/action encoders).
 
         If `n_fuse_layer == 0` and `use_fusion_type_embed == False`, this is effectively an identity mapping
@@ -271,7 +278,7 @@ class MaskedDPMultimodal(nn.Module):
                 x_a = x_a + self.fusion_type_embed(type_ids_a)
 
             for blk in self.fusion_blocks:
-                x_s, x_a = blk(x_s, x_a)
+                x_s, x_a = blk(x_s, x_a, mask_s=s_pad_mask, mask_a=a_pad_mask)
 
             x = self._combine_kept_tokens(x_s, x_a, ids_keep)
             x = self.fusion_norm(x)
@@ -369,7 +376,13 @@ class MaskedDPMultimodal(nn.Module):
         a_encoded = self.action_encoder_norm(a_encoded)
         
         # Fuse and return kept tokens for the decoder
-        x_fused = self.forward_fusion(s_encoded, a_encoded, ids_keep)
+        x_fused = self.forward_fusion(
+            s_encoded, 
+            a_encoded, 
+            ids_keep, 
+            s_pad_mask=s_pad_mask_1d, 
+            a_pad_mask=a_pad_mask_1d
+        )
         
         # Return also ids_keep to track state/action positions
         return x_fused, mask, ids_restore, ids_keep

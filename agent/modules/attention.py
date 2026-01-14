@@ -23,6 +23,7 @@ class CrossAttention(nn.Module):
     Simple Generic CrossAttention (based on LXMERT). 
     x: source query
     context: source of Key/Value
+    key_padding_mask (True = ignore)
     Without causal masking.
     """
     def __init__(self, config):
@@ -39,7 +40,11 @@ class CrossAttention(nn.Module):
         self.resid_drop = nn.Dropout(config.resid_pdrop)
         self.proj = nn.Linear(config.n_embd, config.n_embd)
 
-    def forward(self, x, context):
+    def forward(self, x, context, key_padding_mask=None):
+        # x: Query [B, T_x, C]
+        # context: Key/Value [B, T_ctx, C]
+        # key_padding_mask: [B, T_ctx] bool
+        
         B, T_x, C = x.size()
         B, T_ctx, _ = context.size()
 
@@ -51,7 +56,14 @@ class CrossAttention(nn.Module):
         # Attention (B, nh, T_x, T_ctx)
         att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
         
-        att = F.softmax(att, dim=-1)
+        if key_padding_mask is not None:
+            # Expand mask for broadcasting: [B, 1, 1, T_ctx]
+            mask = key_padding_mask.unsqueeze(1).unsqueeze(2)
+            att = att.masked_fill(mask, float("-inf"))
+            att = F.softmax(att, dim=-1)
+        else:
+            att = F.softmax(att, dim=-1)
+        
         att = self.attn_drop(att)
         
         y = att @ v 
@@ -89,11 +101,11 @@ class CoAttentionBlock(nn.Module):
             nn.Dropout(config.resid_pdrop),
         )
 
-    def forward(self, x_s, x_a):
+    def forward(self, x_s, x_a, mask_s=None, mask_a=None):
         # Cross Attention (residual connection)
-        x_s = x_s + self.cross_attn_s(self.ln1_s(x_s), self.ln1_a(x_a))
-        x_a = x_a + self.cross_attn_a(self.ln1_a(x_a), self.ln1_s(x_s))
-        
+        x_s = x_s + self.cross_attn_s(self.ln1_s(x_s), self.ln1_a(x_a), key_padding_mask=mask_a)
+        x_a = x_a + self.cross_attn_a(self.ln1_a(x_a), self.ln1_s(x_s), key_padding_mask=mask_s)
+
         # Feed Forward
         x_s = x_s + self.mlp_s(self.ln2_s(x_s))
         x_a = x_a + self.mlp_a(self.ln2_a(x_a))
