@@ -16,7 +16,7 @@ eval_every_steps: 25000
 num_eval_episodes: 10
 
 # snapshot
-snapshots: [0, 50000, 100000, 150000, 200000, 250000, 300000, 350000, 400000, 450000, 500000, 550000, 600000]
+snapshots: [0, 50000, 100000, 125000, 150000, 175000, 200000, 225000, 250000, 300000, 350000, 400000, 450000, 500000, 550000, 600000]
 snapshot_dir: /home/bmancilla/archive/maskdp_snapshots
 
 # resume
@@ -36,6 +36,11 @@ goal_buffer_size: 100000
 goal_buffer_num_workers: 4
 num_goal_eval_episodes: 20
 
+# Surgery settings
+load_unimodal: true
+pretrained_state_path: "/home/bmancilla/archive/MaskDP/maskdp_snapshots/weights/unimodal/state/snapshot_100000.pt"
+pretrained_action_path: "/home/bmancilla/archive/MaskDP/maskdp_snapshots/weights/unimodal/action/snapshot_100000.pt"
+
 # Miscelaneous
 seed: 1
 device: cuda
@@ -44,7 +49,7 @@ use_tb: true
 use_wandb: true
 project: maskdp-mm
 notes: "pretrain-full cheetah mm"
-exp_name: fusion_exp_no_freeze
+exp_name: fase2_multimodal_cross_freeze
 
 hydra:
   run:

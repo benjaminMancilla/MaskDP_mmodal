@@ -153,7 +153,23 @@ def main(cfg):
         cfg.agent,
         obs_shape=env.observation_spec().shape,
         action_shape=env.action_spec().shape,
+        train_mode=cfg.agent.train_mode,
     )
+
+    if cfg.get('load_unimodal', False):
+        assert cfg.pretrained_state_path is not None, \
+            "load_unimodal=True requiere pretrained_state_path"
+        assert cfg.pretrained_action_path is not None, \
+            "load_unimodal=True requiere pretrained_action_path"
+        assert not cfg.resume, \
+            "No puedes usar load_unimodal y resume simultáneamente"
+
+        utils.load_unimodal_weights(
+            agent.model,
+            cfg.pretrained_state_path,
+            cfg.pretrained_action_path,
+            device
+        )
 
     if cfg.resume is True:
         resume_dir = get_dir(cfg)
