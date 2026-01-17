@@ -495,6 +495,11 @@ class MaskedDPMultimodal(nn.Module):
         # MSE per dimension
         loss_s = (pred_s - target_s) ** 2
         loss_a = (pred_a - target_a) ** 2
+        
+        if self.train_mode == 'state_only':
+            loss_a = torch.zeros_like(loss_a)
+        elif self.train_mode == 'action_only':
+            loss_s = torch.zeros_like(loss_s)
 
         # Mean MSE per token 
         loss_s_t = loss_s.mean(dim=-1)
@@ -512,9 +517,14 @@ class MaskedDPMultimodal(nn.Module):
         action_loss = loss_a.mean()
 
         if self.train_mode == 'state_only':
+            state_loss = loss_s.mean()
             action_loss = torch.tensor(0.0, device=target_a.device)
         elif self.train_mode == 'action_only':
             state_loss = torch.tensor(0.0, device=target_s.device)
+            action_loss = loss_a.mean()
+        else:
+            state_loss = loss_s.mean()
+            action_loss = loss_a.mean()
         
         return masked_loss, state_loss, action_loss
 
