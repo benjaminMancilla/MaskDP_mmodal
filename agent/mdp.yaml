@@ -32,8 +32,8 @@ train_mode: 'joint'           # 'joint' | 'state_only' | 'action_only'
 
 #freeze_schedule: {}
 
- freeze_schedule:
-   state_encoder_blocks:  [0, 40000000]
-   action_encoder_blocks: [0, 40000000]
-   # fusion_blocks:         [0     , 200000]
-   # decoder_blocks:        [0     , 150000]
+freeze_schedule:
+  state_encoder_blocks:  [0, 40000000]
+  action_encoder_blocks: [0, 40000000]
+  # fusion_blocks:         [0     , 200000]
+  # decoder_blocks:        [0     , 150000]
