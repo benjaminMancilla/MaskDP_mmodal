@@ -374,3 +374,59 @@ def interpolate_pos_embed(pos_embed, new_size):
 def get_one_hot(num_classes, labels):
     y = torch.eye(num_classes)
     return y[labels]
+
+def load_unimodal_weights(model, state_ckpt_path, action_ckpt_path, device):
+    """
+    Weights load from separate unimodal checkpoints.
+    Keeps decoder and fusion blocks with their current initialization (random).
+    """
+    print(f"\n[Surgery] Initializing hybrid weight loading...")
+    
+    # Load checkpoints ------------------------------------------
+    
+    print(f"[Surgery] Loading State Encoder from: {state_ckpt_path}")
+    try:
+        state_payload = torch.load(state_ckpt_path, map_location=device)
+        state_dict_s = state_payload['model'] if 'model' in state_payload else state_payload
+    except Exception as e:
+        raise RuntimeError(f"Failed to load state checkpoint: {e}")
+
+    print(f"[Surgery] Loading Action Encoder from: {action_ckpt_path}")
+    try:
+        action_payload = torch.load(action_ckpt_path, map_location=device)
+        state_dict_a = action_payload['model'] if 'model' in action_payload else action_payload
+    except Exception as e:
+        raise RuntimeError(f"Failed to load action checkpoint: {e}")
+    
+    current_model_dict = model.state_dict()
+    new_state_dict = {}
+    loaded_keys = []
+
+    # Weight Surgery ------------------------------------------
+    for key in current_model_dict.keys():
+        # CASE 1: State Encoder
+        if key.startswith('state_encoder') or key.startswith('state_embed') or key.startswith('state_encoder_norm'):
+            if key in state_dict_s:
+                new_state_dict[key] = state_dict_s[key]
+                loaded_keys.append(key)
+            else:
+                print(f"[Surgery] Warning: Key '{key}' but not found in state checkpoint. Keeping random initialization.")
+                new_state_dict[key] = current_model_dict[key]
+
+        # CASE 2: Action Encoder
+        elif key.startswith('action_encoder') or key.startswith('action_embed') or key.startswith('action_encoder_norm'):
+            if key in state_dict_a:
+                new_state_dict[key] = state_dict_a[key]
+                loaded_keys.append(key)
+            else:
+                print(f"[Surgery] Warning: Key '{key}' but not found in action checkpoint. Keeping random initialization.")
+                new_state_dict[key] = current_model_dict[key]
+        
+        # CASE 3: Decoder, Fusion, Heads -> RESET (random)
+        # We just copy what we already have in current model (random init)
+        else:
+            new_state_dict[key] = current_model_dict[key]
+            
+    # Weights injection ------------------------
+    model.load_state_dict(new_state_dict)
+    print(f"[Surgery] Completed {len(loaded_keys)} keys from unimodal checkpoints into the multimodal model.\n")
