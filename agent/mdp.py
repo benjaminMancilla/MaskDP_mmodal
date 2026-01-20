@@ -34,6 +34,15 @@ class MaskedDPMultimodal(nn.Module):
         self.state_embed = nn.Linear(obs_dim, self.n_embd)
         self.action_embed = nn.Linear(action_dim, self.n_embd)
         
+        # Modality droupout
+        self.modality_dropout = bool(getattr(config, "modality_dropout", True))
+        self.modality_dropout_prob = float(getattr(config, "modality_dropout_prob", 0.25))
+        self.p_drop_action = float(getattr(config, "action_dropout_prob", 1.0))
+        self.p_drop_state = float(getattr(config, "state_dropout_prob", 0.0))
+        if self.modality_dropout:
+            print(f"Modality Dropout ENABLED (Global Prob={self.modality_dropout_prob})")
+            print(f"Rel. Weights -> Action: {self.p_drop_action}, State: {self.p_drop_state}")
+
         # Separate encoders for state and action
         self.state_encoder_blocks = nn.ModuleList(
             [Block(config) for _ in range(config.n_enc_layer)]
@@ -158,7 +167,7 @@ class MaskedDPMultimodal(nn.Module):
             nn.init.constant_(m.bias, 0)
             nn.init.constant_(m.weight, 1.0)
 
-    def random_masking(self, x, mask_ratio):
+    def random_masking(self, x, mask_ratio, noise=None):
         """
         Perform per-sample random masking by per-sample shuffling.
         Per-sample shuffling is done by argsort random noise.
@@ -166,12 +175,15 @@ class MaskedDPMultimodal(nn.Module):
 
         Applies the same masking pattern for states and actions
         to maintain temporal consistency (concatenated sequence)
+        
+        If noise is provided, use it to bias the sorting order.
         """
         N, L, D = x.shape  # batch, length, dim
         len_keep = int(L * (1 - mask_ratio))
 
         # noise independent between modalities
-        noise = torch.rand(N, L, device=x.device)  # noise in [0, 1]
+        if noise is None:
+            noise = torch.rand(N, L, device=x.device)  # noise in [0, 1]
 
         # sort noise for each sample
         ids_shuffle = torch.argsort(
@@ -346,9 +358,20 @@ class MaskedDPMultimodal(nn.Module):
 
         # Interleave states and actions: [s0, a0, s1, a1, s2, a2, ...]
         x = torch.stack([s_emb, a_emb], dim=2).reshape(batch_size, 2 * T, self.n_embd)
+        noise = None
+        
+        # Modality Dropout (only during training)
+        if self.training and self.modality_dropout and (np.random.rand() < self.modality_dropout_prob):
+            noise = torch.rand(batch_size, 2 * T, device=states.device)
+            total_prob = self.p_drop_action + self.p_drop_state
+            p_action = self.p_drop_action / total_prob if total_prob > 0 else 0.5
+            # Biased masking: masking high noisy modality tokens
+            drop_actions = np.random.rand() < p_action
+            start_idx = 1 if drop_actions else 0
+            noise[:, start_idx::2] += 100.0
         
         # Apply masking on the full interleaved sequence
-        x_masked, mask, ids_restore, ids_keep = self.random_masking(x, mask_ratio)
+        x_masked, mask, ids_restore, ids_keep = self.random_masking(x, mask_ratio, noise=noise)
 
         # Now separate the kept tokens into states and actions
         # ids_keep[b, j] tells us the original index in [0, 2T-1]
