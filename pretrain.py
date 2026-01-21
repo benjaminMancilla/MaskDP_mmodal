@@ -155,6 +155,23 @@ def main(cfg):
         action_shape=env.action_spec().shape,
         train_mode=cfg.agent.train_mode,
     )
+    
+    if cfg.get("finetune_from", None):
+        snapshot = Path(cfg.finetune_from)
+        print(f"--> [Fine-Tuning] Loading weights: {snapshot}")
+        
+        payload = torch.load(snapshot)
+        agent.model.load_state_dict(payload["model"])
+        if cfg.get("load_step", True):
+            if "step" in payload:
+                global_step = payload["step"]
+            else:
+                try:
+                    global_step = int(snapshot.stem.split('_')[-1])
+                except Exception as e:
+                    print(f"--> [Warning] No se pudo deducir el step del nombre: {e}. Usando 0.")
+                    global_step = 0
+            print(f"--> [Fine-Tuning] resuming global steps: {global_step}")
 
     if cfg.get('load_unimodal', False):
         assert cfg.pretrained_state_path is not None, \
@@ -171,7 +188,7 @@ def main(cfg):
             device
         )
 
-    if cfg.resume is True:
+    if cfg.resume and not cfg.get("finetune_from", None):
         resume_dir = get_dir(cfg)
         payload = torch.load(resume_dir)
         agent.model.load_state_dict(payload["model"])
@@ -188,18 +205,61 @@ def main(cfg):
     wandb_config = omegaconf.OmegaConf.to_container(
         cfg, resolve=True, throw_on_missing=True
     )
-    wandb.init(
-        project=cfg.project,
-        name=exp_name,
-        config=wandb_config,
-        settings=wandb.Settings(
+    wandb_kwargs = {
+        "project": cfg.project,
+        "name": exp_name,
+        "config": wandb_config,
+        "settings": wandb.Settings(
             start_method="thread",
             _disable_stats=True,
         ),
-        mode="online" if cfg.use_wandb else "offline",
-        notes=cfg.notes,
-    )
+        "mode": "online" if cfg.use_wandb else "offline",
+        "notes": cfg.notes,
+    }
+    if cfg.get("wandb_id", None):
+        wandb_kwargs["id"] = str(cfg.wandb_id)
+        wandb_kwargs["resume"] = "allow"
+    
+    wandb.init(**wandb_kwargs)
     logger = Logger(work_dir, use_tb=cfg.use_tb, use_wandb=cfg.use_wandb)
+    
+    # WandB: Clone metrics from another run
+    if cfg.get("copy_metrics_from", None) and cfg.use_wandb:
+        src_id = str(cfg.copy_metrics_from)
+        limit_step = global_step
+        
+        print(f"--> [WandB] Clonning from Run ID: {src_id} (to {limit_step})...")
+        
+        try:
+            api = wandb.Api()
+            user_entity = cfg.get("wandb_entity", "benjamin-mancilla")
+            run_path = f"{user_entity}/{cfg.project}/{src_id}"
+            
+            old_run = api.run(run_path)
+
+            history = old_run.scan_history()
+            count = 0
+            for i, row in enumerate(history):
+                row = {k: v for k, v in row.items() if not k.startswith("_")}
+                current_step = row.get('_step', row.get('global_step', row.get('train/step', None)))
+                if i == 0:
+                    print(f"--> [DEBUG WandB] Llaves encontradas en fila 0: {list(row.keys())}")
+                    print(f"--> [DEBUG WandB] Step encontrado: {current_step}")
+
+                if current_step is None:
+                    continue
+
+                if current_step > limit_step:
+                    continue
+
+                wandb.log(row, step=current_step)
+                count += 1
+            
+            print(f"--> [WandB] Cloned {count} historical records.")
+            
+        except Exception as e:
+            print(f"--> [WandB Warning] Failed to clone history: {e}")
+            print("--> Continuing training without previous history...")
 
     # Create TRAIN replay loader
     replay_train_dir = Path(cfg.replay_buffer_dir) / domain
@@ -243,7 +303,8 @@ def main(cfg):
             print(f"Warning: Goal dir {goal_dir} not found. Skipping goal evaluation.")
             
     timer = utils.Timer()
-    global_step = cfg.resume_step
+    if not cfg.get("finetune_from", None):
+        global_step = cfg.resume_step
 
     train_until_step = utils.Until(cfg.num_grad_steps)
     eval_every_step = utils.Every(cfg.eval_every_steps)

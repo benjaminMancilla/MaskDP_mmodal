@@ -1,0 +1,16 @@
+defaults:
+  - pretrain_full
+  - _self_
+
+finetune_from: "/home/bmancilla/archive/maskdp_snapshots/weights/fusion_frozen/cross/snapshot_100000.pt"
+# wandb_id: null                        # continue a wandb run
+copy_metrics_from: "rpcedphl"           # create a new wandb run but copy metrics
+experiment: "finetune_phase3_end2end"
+wandb_entity: "benjamin-mancilla-universidad-de-chile"
+project: maskdp-mm
+resume: false
+exp_name: "finetune_phase3_cross"
+
+agent:
+  freeze_schedule: {} 
+  lr: 5e-5 
