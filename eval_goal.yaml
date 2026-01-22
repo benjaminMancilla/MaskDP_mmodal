@@ -1,5 +1,5 @@
 defaults:
-  - agent: mdp_mm_goal
+  - agent: mdp_goal
   - override hydra/launcher: submitit_local
   - _self_
 
@@ -30,6 +30,9 @@ project: maskdp-mm-eval
 notes: "eval single-task single-goal for mm"
 replan: true
 
+# W&B resume support (optional)
+wandb_run_id: null 
+wandb_resume: "allow"  # "allow" | "must" | "never"
 
 hydra:
   run:

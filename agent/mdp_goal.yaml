@@ -1,6 +1,6 @@
 # @package agent
 _target_: agent.mdp_goal.MDP_MM_GoalAgent
-name: mdp_mm_goal
+name: mdp_goal
 obs_shape: ??? # to be specified later
 action_shape: ??? # to be specified later
 device: ${device}
@@ -13,6 +13,9 @@ transformer_cfg:
   n_head: 4
   n_enc_layer: 3
   n_dec_layer: 2
+  n_fuse_layer: 1
+  use_fusion_type_embed: true
+  fusion_type: 'cross'
   embd_pdrop: 0
   resid_pdrop: 0
   attn_pdrop: 0
@@ -20,3 +23,4 @@ transformer_cfg:
   traj_length: 5
   loss: 'masked'
   pe: 'fixed'
+  norm: 'l2'

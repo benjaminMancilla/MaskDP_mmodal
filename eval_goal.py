@@ -245,21 +245,47 @@ def main(cfg):
     cfg.agent.obs_shape = env.observation_spec().shape
     cfg.agent.action_shape = env.action_spec().shape
     cfg.agent.transformer_cfg = agent.config
+    
+    # Determine experiment name
     exp_name = "_".join([cfg.agent.name, cfg.task, str(cfg.replan), str(cfg.seed)])
+    
     wandb_config = omegaconf.OmegaConf.to_container(
         cfg, resolve=True, throw_on_missing=True
     )
-    wandb.init(
-        project=cfg.project,
-        name=exp_name,
-        config=wandb_config,
-        settings=wandb.Settings(
-            start_method="thread",
-            _disable_stats=True,
-        ),
-        mode="online" if cfg.use_wandb else "offline",
-        notes=cfg.notes,
-    )
+    
+    # W&B initialization with resume support
+    wandb_mode = "online" if cfg.use_wandb else "offline"
+    wandb_resume = cfg.get("wandb_resume", "allow")  # "allow", "must", "never", or None
+    wandb_run_id = cfg.get("wandb_run_id", None)  # Existing run ID to resume
+    
+    if wandb_run_id is not None:
+        print(f"Resuming W&B run: {wandb_run_id}")
+        wandb.init(
+            project=cfg.project,
+            id=wandb_run_id,
+            resume=wandb_resume,
+            config=wandb_config,
+            settings=wandb.Settings(
+                start_method="thread",
+                _disable_stats=True,
+            ),
+            mode=wandb_mode,
+            notes=cfg.notes,
+        )
+    else:
+        print(f"Creating new W&B run: {exp_name}")
+        wandb.init(
+            project=cfg.project,
+            name=exp_name,
+            config=wandb_config,
+            settings=wandb.Settings(
+                start_method="thread",
+                _disable_stats=True,
+            ),
+            mode=wandb_mode,
+            notes=cfg.notes,
+        )
+    
     logger = Logger(work_dir, use_tb=cfg.use_tb, use_wandb=cfg.use_wandb)
 
     # create replay buffer
@@ -297,7 +323,7 @@ def main(cfg):
 
     timer = utils.Timer()
 
-    global_step = 0
+    global_step = cfg.snapshot_ts  # Use snapshot_ts as the x-axis value
     eval_every_step = utils.Every(cfg.eval_every_steps)
 
     if eval_every_step(global_step):

@@ -46,7 +46,7 @@ def create_goal_agent_from_snapshot(pretrain_agent, device, cfg):
     import agent.mdp_goal as mdp_goal_module
     
     goal_agent = mdp_goal_module.MDP_MM_GoalAgent(
-        name="mdp_mm_goal",
+        name="mdp_goal",
         obs_shape=cfg.agent.obs_shape,
         action_shape=cfg.agent.action_shape,
         device=device,
