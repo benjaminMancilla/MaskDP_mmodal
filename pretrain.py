@@ -21,6 +21,7 @@ from replay_buffer import make_replay_loader
 from video import VideoRecorder
 import wandb
 import omegaconf
+import agent.mdp_goal as mdp_goal_module
 
 torch.backends.cudnn.benchmark = True
 
@@ -42,8 +43,7 @@ def get_data_seed(seed, num_data_seeds):
     return (seed - 1) % num_data_seeds + 1
 
 def create_goal_agent_from_snapshot(pretrain_agent, device, cfg):
-    """Crea un agente goal-conditioned cargando los pesos del agente de pretrain"""
-    import agent.mdp_goal as mdp_goal_module
+    """Creates an goal-conditioned agent loading the pretrain agent weights"""
     
     goal_agent = mdp_goal_module.MDP_MM_GoalAgent(
         name="mdp_goal",
@@ -169,17 +169,17 @@ def main(cfg):
                 try:
                     global_step = int(snapshot.stem.split('_')[-1])
                 except Exception as e:
-                    print(f"--> [Warning] No se pudo deducir el step del nombre: {e}. Usando 0.")
+                    print(f"--> [Warning] Couldn't manage the step name: {e}. Using 0 instead.")
                     global_step = 0
             print(f"--> [Fine-Tuning] resuming global steps: {global_step}")
 
     if cfg.get('load_unimodal', False):
         assert cfg.pretrained_state_path is not None, \
-            "load_unimodal=True requiere pretrained_state_path"
+            "load_unimodal=True requires pretrained_state_path"
         assert cfg.pretrained_action_path is not None, \
-            "load_unimodal=True requiere pretrained_action_path"
+            "load_unimodal=True requires pretrained_action_path"
         assert not cfg.resume, \
-            "No puedes usar load_unimodal y resume simultáneamente"
+            "Loading unimodales weigths and resuming is disabled"
 
         utils.load_unimodal_weights(
             agent.model,
@@ -243,8 +243,8 @@ def main(cfg):
                 row = {k: v for k, v in row.items() if not k.startswith("_")}
                 current_step = row.get('_step', row.get('global_step', row.get('train/step', None)))
                 if i == 0:
-                    print(f"--> [DEBUG WandB] Llaves encontradas en fila 0: {list(row.keys())}")
-                    print(f"--> [DEBUG WandB] Step encontrado: {current_step}")
+                    print(f"--> [DEBUG WandB] Keys finded in row 0: {list(row.keys())}")
+                    print(f"--> [DEBUG WandB] Step founded: {current_step}")
 
                 if current_step is None:
                     continue
@@ -318,8 +318,7 @@ def main(cfg):
         # Goal-reaching evaluation
         if goal_iter is not None and eval_every_step(global_step):
             print(f"[{global_step}] Running goal-reaching evaluation...")
-            
-            # Crear agente goal temporal con los pesos actuales del pretrain
+
             goal_agent = create_goal_agent_from_snapshot(agent, device, cfg)
             
             # Evaluate open-loop (replan=False)
@@ -360,7 +359,6 @@ def main(cfg):
                 
             logger.dump(global_step, ty="eval")
             
-            # Limpiar memoria
             del goal_agent
             torch.cuda.empty_cache()
             
