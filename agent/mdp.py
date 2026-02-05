@@ -1,3 +1,4 @@
+import math
 import hydra
 import numpy as np
 import torch
@@ -565,7 +566,8 @@ class MaskedDPMultimodalAgent:
         mask_ratio,
         transformer_cfg,
         freeze_schedule=None,
-        train_mode='joint'
+        train_mode='joint',
+        warmup_steps=0
     ):
         self.action_dim = action_shape[0]
         self.lr = lr
@@ -575,6 +577,14 @@ class MaskedDPMultimodalAgent:
         
         # Schedule {'module_nane': [start_step, end_step]}
         self.freeze_schedule = freeze_schedule if freeze_schedule is not None else {}
+
+        # Warmup logic
+        if warmup_steps > 0:
+            self.warmup_steps = math.ceil(warmup_steps / 1000.0) * 1000
+            print(f"Warmup ENABLED: Requested {warmup_steps} -> Adjusted to {self.warmup_steps} steps")
+        else:
+            self.warmup_steps = 0
+        self.warmup_start_step = None
 
         # models
         self.model = MaskedDPMultimodal(
@@ -600,6 +610,8 @@ class MaskedDPMultimodalAgent:
         """Rebuild optimizer with only trainable parameters"""
         trainable_params = [p for p in self.model.parameters() if p.requires_grad]
         print(f"Rebuilding optimizer with {len(trainable_params)} trainable parameter groups")
+        # Note: This resets optimizer state (momentum), which is unavoidable when parameters change.
+        # It also resets LR to self.lr. Warmup logic in update_mdp will handle re-adjusting LR if needed.
         self.opt = torch.optim.Adam(trainable_params, lr=self.lr)
             
     def check_freeze_schedule(self, step):
@@ -632,6 +644,27 @@ class MaskedDPMultimodalAgent:
 
     def update_mdp(self, states, actions, step=None):
         self.check_freeze_schedule(step)
+        
+        # Warmup Logic
+        if step is not None and self.warmup_steps > 0:
+            if self.warmup_start_step is None:
+                self.warmup_start_step = step
+            
+            steps_since_start = step - self.warmup_start_step
+            
+            if steps_since_start < self.warmup_steps:
+                # Linear Warmup: from almost 0 to self.lr
+                # (steps_since_start + 1) avoids 0 LR if we want to start strictly > 0
+                warmup_factor = (steps_since_start + 1) / float(self.warmup_steps)
+                current_lr = self.lr * warmup_factor
+                for param_group in self.opt.param_groups:
+                    param_group['lr'] = current_lr
+            
+            elif steps_since_start == self.warmup_steps:
+                # Ensure we hit the exact target LR at the end of warmup
+                for param_group in self.opt.param_groups:
+                    param_group['lr'] = self.lr
+
         metrics = dict()
         mask_ratio = np.random.choice(self.mask_ratio)
         

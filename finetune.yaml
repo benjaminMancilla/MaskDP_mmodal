@@ -13,4 +13,5 @@ exp_name: "finetune_phase3_cross"
 
 agent:
   freeze_schedule: {} 
-  lr: 5e-5 
+  lr: 1e-6 
+  warmup_steps: 2000
