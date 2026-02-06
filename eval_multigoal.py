@@ -177,6 +177,7 @@ def eval_mdp(
     num_eval_episodes,
     video_recorder,
     replan=False,
+    replan_freq=1,
 ):
     step, episode, total_dist2goal = 0, 0, []
     eval_until_episode = utils.Until(num_eval_episodes)
@@ -220,25 +221,47 @@ def eval_mdp(
             episode += 1
             total_dist2goal.append(episode_dist)
         else:
+            # CLOSED LOOP (RECEDING HORIZON CONTROL)
             obs = start_obs[episode]
             episode_budget = time_budget[episode]
             total_episode_budget = episode_budget[-1]
             goal_index = 0
             states = []
+
+            current_plan = None
+            steps_since_replan = 0
+
             for i in range(total_episode_budget):
+                goal_changed = False
                 if i == episode_budget[goal_index]:
                     goal_index += 1
-                with torch.no_grad(), utils.eval_mode(agent):
-                    action = agent.multi_goal_act(
-                        obs.unsqueeze(0),
-                        goal[episode, goal_index:],
-                        time_budget[episode, goal_index:] - i,
-                    )[0, ...]
-                    time_step = env.step(action)
-                    video_recorder.record(env)
-                    obs = np.asarray(time_step.observation)
-                    obs = torch.as_tensor(obs, device=device)
-                    states.append(np.asarray(time_step.observation))
+                    goal_changed = True
+
+                # Replan if:
+                # 1. Is the first step (t=0)
+                # 2. Goal changed (goal_changed) -> must replan
+                # 3. Replan frequency is done (steps_since_replan >= replan_freq)
+                should_replan = (i == 0) or goal_changed or (steps_since_replan >= replan_freq)
+                if should_replan:
+                    with torch.no_grad(), utils.eval_mode(agent):
+                        current_plan = agent.multi_goal_act(
+                            obs.unsqueeze(0),
+                            goal[episode, goal_index:],
+                            time_budget[episode, goal_index:] - i,
+                        )
+                    steps_since_replan = 0
+                    
+                if steps_since_replan >= len(current_plan):
+                    action = current_plan[-1]
+                else:
+                    action = current_plan[steps_since_replan]
+
+                time_step = env.step(action)
+                video_recorder.record(env)
+                obs = np.asarray(time_step.observation)
+                obs = torch.as_tensor(obs, device=device)
+                states.append(np.asarray(time_step.observation))
+                steps_since_replan += 1
 
             states = np.array(states)
             episode_dist = []
@@ -362,6 +385,7 @@ def main(cfg):
                 cfg.num_eval_episodes,
                 video_recorder,
                 replan=cfg.replan,
+                replan_freq=cfg.get("replan_freq", 1),
             )
         elif cfg.agent.name == "bc_goal":
             eval_bc(

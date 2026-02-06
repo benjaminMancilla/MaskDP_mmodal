@@ -155,6 +155,7 @@ def eval_mdp(
     num_eval_episodes,
     video_recorder,
     replan=False,
+    replan_freq=1
 ):
     step, episode, total_dist2goal = 0, 0, []
     eval_until_episode = utils.Until(num_eval_episodes)
@@ -191,14 +192,28 @@ def eval_mdp(
             episode += 1
             total_dist2goal.append(dist2goal)
         else:
+            # CLOSED LOOP (RECEDING HORIZON CONTROL)
             obs = start_obs[episode]
+            current_plan = None
+            
             for t in range(timestep[episode]):
-                with torch.no_grad(), utils.eval_mode(agent):
-                    action = agent.act(
-                        obs.unsqueeze(0),
-                        goal_obs[episode].unsqueeze(0),
-                        timestep[episode] - t,
-                    )[0, ...]
+                # Replan if:
+                # 1. Is the first step (t=0)
+                # 2. Replan frequency is done
+                if t % replan_freq == 0:
+                    time_remaining = timestep[episode] - t
+                    with torch.no_grad(), utils.eval_mode(agent):
+                        current_plan = agent.act(
+                            obs.unsqueeze(0),
+                            goal_obs[episode].unsqueeze(0),
+                            time_remaining,
+                        )
+
+                plan_index = t % replan_freq
+                if plan_index >= len(current_plan):
+                     plan_index = -1
+
+                action = current_plan[plan_index]
                 time_step = env.step(action)
                 obs = np.asarray(time_step.observation)
                 obs = torch.as_tensor(obs, device=device)
@@ -339,6 +354,7 @@ def main(cfg):
                 cfg.num_eval_episodes,
                 video_recorder,
                 replan=cfg.replan,
+                replan_freq=cfg.get("replan_freq", 1),
             )
         elif cfg.agent.name == "bc_goal":
             eval_bc(

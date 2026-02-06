@@ -29,6 +29,7 @@ use_wandb: true
 project: maskdp-eval
 notes: "eval single-task multi-goal"
 replan: true
+replan_freq: 15
 
 
 hydra:

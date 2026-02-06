@@ -29,6 +29,7 @@ use_wandb: true
 project: maskdp-mm-eval
 notes: "eval single-task single-goal for mm"
 replan: true
+replan_freq: 15
 
 # W&B resume support (optional)
 wandb_run_id: null 
