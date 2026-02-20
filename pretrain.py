@@ -223,6 +223,18 @@ def main(cfg):
     wandb.init(**wandb_kwargs)
     logger = Logger(work_dir, use_tb=cfg.use_tb, use_wandb=cfg.use_wandb)
     
+    if cfg.use_wandb and wandb.run is not None:
+        wandb.config.update({"snapshot_dir_absolute": str(snapshot_dir.absolute())}, allow_val_change=True)
+
+        info_file = snapshot_dir / "wandb_info.txt"
+        with open(info_file, "w") as f:
+            f.write(f"Experiment Name: {exp_name}\n")
+            f.write(f"WandB Run ID: {wandb.run.id}\n")
+            f.write(f"WandB Run URL: {wandb.run.get_url()}\n")
+            f.write(f"Slurm Job ID: {os.environ.get('SLURM_JOB_ID', 'N/A')}\n")
+            f.write(f"Modality Dropout: {cfg.agent.transformer_cfg.modality_dropout}\n")
+            f.write(f"Dropout Prob: {cfg.agent.transformer_cfg.modality_dropout_prob}\n")
+    
     # WandB: Clone metrics from another run
     if cfg.get("copy_metrics_from", None) and cfg.use_wandb:
         src_id = str(cfg.copy_metrics_from)
