@@ -40,9 +40,12 @@ class MaskedDPMultimodal(nn.Module):
         self.modality_dropout_prob = float(getattr(config, "modality_dropout_prob", 0.25))
         self.p_drop_action = float(getattr(config, "action_dropout_prob", 1.0))
         self.p_drop_state = float(getattr(config, "state_dropout_prob", 0.0))
+        self.min_keep_states = int(getattr(config, "min_keep_states",  1))
+        self.min_keep_actions = int(getattr(config, "min_keep_actions", 0))
         if self.modality_dropout:
             print(f"Modality Dropout ENABLED (Global Prob={self.modality_dropout_prob})")
             print(f"Rel. Weights -> Action: {self.p_drop_action}, State: {self.p_drop_state}")
+            print(f"Min. Tokens -> Actions: {self.min_keep_actions}, States: {self.min_keep_states}")
 
         # Separate encoders for state and action
         self.state_encoder_blocks = nn.ModuleList(
@@ -359,17 +362,29 @@ class MaskedDPMultimodal(nn.Module):
 
         # Interleave states and actions: [s0, a0, s1, a1, s2, a2, ...]
         x = torch.stack([s_emb, a_emb], dim=2).reshape(batch_size, 2 * T, self.n_embd)
-        noise = None
+        noise = torch.rand(batch_size, 2 * T, device=states.device)
         
         # Modality Dropout (only during training)
         if self.training and self.modality_dropout and (np.random.rand() < self.modality_dropout_prob):
-            noise = torch.rand(batch_size, 2 * T, device=states.device)
             total_prob = self.p_drop_action + self.p_drop_state
             p_action = self.p_drop_action / total_prob if total_prob > 0 else 0.5
             # Biased masking: masking high noisy modality tokens
             drop_actions = np.random.rand() < p_action
             start_idx = 1 if drop_actions else 0
             noise[:, start_idx::2] += 100.0
+            
+        # Modality shields (min keep tokens)
+        if self.min_keep_states > 0:
+            k_s = min(self.min_keep_states, T)
+            _, top_s_idx = torch.topk(torch.rand(batch_size, T, device=states.device), k_s, dim=1)
+            top_s_idx_interleaved = top_s_idx * 2
+            noise.scatter_(1, top_s_idx_interleaved, -100.0)
+            
+        if self.min_keep_actions > 0:
+            k_a = min(self.min_keep_actions, T)
+            _, top_a_idx = torch.topk(torch.rand(batch_size, T, device=states.device), k_a, dim=1)
+            top_a_idx_interleaved = top_a_idx * 2 + 1
+            noise.scatter_(1, top_a_idx_interleaved, -100.0)
         
         # Apply masking on the full interleaved sequence
         x_masked, mask, ids_restore, ids_keep = self.random_masking(x, mask_ratio, noise=noise)
