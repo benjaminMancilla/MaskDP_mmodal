@@ -234,6 +234,8 @@ def main(cfg):
             f.write(f"Slurm Job ID: {os.environ.get('SLURM_JOB_ID', 'N/A')}\n")
             f.write(f"Modality Dropout: {cfg.agent.transformer_cfg.modality_dropout}\n")
             f.write(f"Dropout Prob: {cfg.agent.transformer_cfg.modality_dropout_prob}\n")
+            f.write(f"Early Fusion: {cfg.agent.transformer_cfg.get('use_early_fusion', False)}\n")
+            f.write(f"MLP Ratio: {cfg.agent.transformer_cfg.get('mlp_ratio', 4)}\n")
     
     # WandB: Clone metrics from another run
     if cfg.get("copy_metrics_from", None) and cfg.use_wandb:

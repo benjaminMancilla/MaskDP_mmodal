@@ -46,7 +46,9 @@ class MDP_MM_GoalAgent:
             
         # Check if this is a multimodal architecture
         self.is_multimodal = self._check_multimodal()
-        print(f"Model type: {'Multimodal' if self.is_multimodal else 'Legacy'}")
+        self.is_early_fusion = hasattr(self.mdp, 'early_fusion_blocks')
+        mode_str = 'Early Fusion' if self.is_early_fusion else ('Late Fusion' if self.is_multimodal else 'Legacy')
+        print(f"Model type: {mode_str}")
 
         self.finetune = finetune
         self._freeze_layers()
@@ -56,8 +58,9 @@ class MDP_MM_GoalAgent:
         """Check if the model has multimodal architecture components."""
         has_state_encoder = hasattr(self.mdp, 'state_encoder_blocks')
         has_action_encoder = hasattr(self.mdp, 'action_encoder_blocks')
+        has_early_fusion = hasattr(self.mdp, 'early_fusion_blocks')
         has_fusion = hasattr(self.mdp, 'fusion_blocks')
-        return has_state_encoder and has_action_encoder and has_fusion
+        return ((has_state_encoder and has_action_encoder) or has_early_fusion) and has_fusion
 
     def _freeze_layers(self):
         frozen_layers = [
@@ -70,7 +73,17 @@ class MDP_MM_GoalAgent:
         ]
 
         if self.finetune == "decoder":
-            if self.is_multimodal:
+            if self.is_early_fusion:
+                frozen_layers += [
+                    self.mdp.early_fusion_blocks, 
+                    self.mdp.state_encoder_norm,
+                    self.mdp.action_encoder_norm,
+                    self.mdp.fusion_blocks,
+                    self.mdp.fusion_norm,
+                ]
+                if self.mdp.fusion_type_embed is not None:
+                    frozen_layers.append(self.mdp.fusion_type_embed)
+            elif self.is_multimodal:
                 frozen_layers += [
                     self.mdp.state_encoder_blocks, 
                     self.mdp.state_encoder_norm,
@@ -135,22 +148,36 @@ class MDP_MM_GoalAgent:
         # ENCODER PHASE
         s_emb = self.mdp.state_embed(obs) + pos_embed[:, 0:1]  # [B, 1, D]
         g_emb = self.mdp.state_embed(goal) + pos_embed[:, 2*T:2*T+1]  # [B, 1, D]
-        
-        # State encoder: process [s0, s_goal]
         s_enc_input = torch.cat([s_emb, g_emb], dim=1)  # [B, 2, D]
-        for blk in self.mdp.state_encoder_blocks:
-            s_enc_input = blk(s_enc_input, attn_mask)
-        s_encoded = self.mdp.state_encoder_norm(s_enc_input)  # [B, 2, D]
-        
-        # Action encoder: process zeros (no ground-truth actions)
+
         a_emb = self.mdp.mask_token.repeat(batch_size, 2, 1)  # [B, 2, D]
         a_emb[:, 0] = a_emb[:, 0] + pos_embed[:, 1]  # position for a0
         a_emb[:, 1] = a_emb[:, 1] + pos_embed[:, 2*T+1]  # position for a_goal
+
+        if self.is_early_fusion:
+            # EARLY FUSION
+            s_encoded = s_enc_input
+            a_encoded = a_emb
+            for blk in self.mdp.early_fusion_blocks:
+                s_encoded, a_encoded = blk(
+                    x_s=s_encoded, x_a=a_encoded,
+                    mask_s=attn_mask, mask_a=attn_mask,
+                    pad_mask_s=None, pad_mask_a=None
+                )
+        else:
+            # LATE FUSION (Baseline)
+            # State encoder: process [s0, s_goal]
+            s_encoded = s_enc_input
+            for blk in self.mdp.state_encoder_blocks:
+                s_encoded = blk(s_encoded, attn_mask)
+            # Action encoder: process zeros (no ground-truth actions)
+            a_encoded = a_emb
+            for blk in self.mdp.action_encoder_blocks:
+                a_encoded = blk(a_encoded, attn_mask)
         
-        for blk in self.mdp.action_encoder_blocks:
-            a_emb = blk(a_emb, attn_mask)
-        a_encoded = self.mdp.action_encoder_norm(a_emb)  # [B, 2, D]
-        
+        s_encoded = self.mdp.state_encoder_norm(s_encoded)  # [B, 2, D]
+        a_encoded = self.mdp.action_encoder_norm(a_encoded)  # [B, 2, D]
+
         # Fusion: combine state and action information
         # Create ids_keep for fusion (interleaved: [0=s0, 1=a0, 2=s_goal, 3=a_goal])
         ids_keep = torch.arange(4, device=self.device).unsqueeze(0).expand(batch_size, -1)
@@ -290,21 +317,35 @@ class MDP_MM_GoalAgent:
         # ENCODER PHASE
         s_emb = self.mdp.state_embed(obs) + pos_embed[:, 0:1]  # [B, 1, D]
         g_emb = self.mdp.state_embed(goal) + pos_embed[:, time_budgets * 2]  # [B, num_goals, D]
-        
-        # State encoder: process [s0, g1, g2, ..., gN]
         s_enc_input = torch.cat([s_emb, g_emb], dim=1)  # [B, num_goals+1, D]
-        for blk in self.mdp.state_encoder_blocks:
-            s_enc_input = blk(s_enc_input, attn_mask)
-        s_encoded = self.mdp.state_encoder_norm(s_enc_input)
-        
-        # Action encoder: process zeros (no ground-truth actions)
+
         a_emb = self.mdp.mask_token.repeat(batch_size, num_goals + 1, 1)  # [B, num_goals+1, D]
         a_emb[:, 0] = a_emb[:, 0] + pos_embed[:, 1]  # position for a0
         a_emb[:, 1] = a_emb[:, 1] + pos_embed[:, 2*T+1]  # position for a_goal
-        
-        for blk in self.mdp.action_encoder_blocks:
-            a_emb = blk(a_emb, attn_mask)
-        a_encoded = self.mdp.action_encoder_norm(a_emb)
+
+        if self.is_early_fusion:
+            # EARLY FUSION
+            s_encoded = s_enc_input
+            a_encoded = a_emb
+            for blk in self.mdp.early_fusion_blocks:
+                s_encoded, a_encoded = blk(
+                    x_s=s_encoded, x_a=a_encoded,
+                    mask_s=attn_mask, mask_a=attn_mask,
+                    pad_mask_s=None, pad_mask_a=None
+                )
+        else:
+            #LATE FUSION
+            # State encoder: process [s0, g1, g2, ..., gN]
+            s_encoded = s_enc_input
+            for blk in self.mdp.state_encoder_blocks:
+                s_encoded = blk(s_encoded, attn_mask)
+            # Action encoder: process zeros (no ground-truth actions)
+            a_encoded = a_emb
+            for blk in self.mdp.action_encoder_blocks:
+                a_encoded = blk(a_encoded, attn_mask)
+
+        s_encoded = self.mdp.state_encoder_norm(s_encoded)
+        a_encoded = self.mdp.action_encoder_norm(a_encoded)
 
         total_tokens = (num_goals + 1) * 2
         ids_keep = torch.arange(total_tokens, device=self.device).unsqueeze(0).expand(batch_size, -1)

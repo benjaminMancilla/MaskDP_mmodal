@@ -27,6 +27,10 @@ transformer_cfg:
   min_keep_states:  1         # minimun of states when dropout
   min_keep_actions: 0         # minimun of actions when dropout
 
+  # Early fusion encoder
+  mlp_ratio: 4
+  use_early_fusion: true
+
   # This stays the same
   embd_pdrop: 0
   resid_pdrop: 0
@@ -40,7 +44,8 @@ train_mode: 'joint'           # 'joint' | 'state_only' | 'action_only'
 #freeze_schedule: {}
 
 freeze_schedule:
-  state_encoder_blocks:  [0, 40000000]
-  action_encoder_blocks: [0, 40000000]
+  # state_encoder_blocks:  [0, 40000000]
+  # action_encoder_blocks: [0, 40000000]
+  early_fusion_blocks: [0, 40000000]
   # fusion_blocks:         [0     , 200000]
   # decoder_blocks:        [0     , 150000]

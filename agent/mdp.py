@@ -10,7 +10,7 @@ from collections import OrderedDict
 import utils
 from dm_control.utils import rewards
 from einops import rearrange, reduce, repeat
-from agent.modules.attention import Block, CausalSelfAttention, CoAttentionBlock
+from agent.modules.attention import Block, CausalSelfAttention, CoAttentionBlock, ParallelCoAttentionBlock
 
 
 class MaskedDPMultimodal(nn.Module):
@@ -47,13 +47,22 @@ class MaskedDPMultimodal(nn.Module):
             print(f"Rel. Weights -> Action: {self.p_drop_action}, State: {self.p_drop_state}")
             print(f"Min. Tokens -> Actions: {self.min_keep_actions}, States: {self.min_keep_states}")
 
-        # Separate encoders for state and action
-        self.state_encoder_blocks = nn.ModuleList(
-            [Block(config) for _ in range(config.n_enc_layer)]
-        )
-        self.action_encoder_blocks = nn.ModuleList(
-            [Block(config) for _ in range(config.n_enc_layer)]
-        )
+        # Feature Flag for Ablation
+        self.use_early_fusion = bool(getattr(config, "use_early_fusion", False))
+
+        if self.use_early_fusion:
+            # EARLY FUSION: Parallel Blocks
+            self.early_fusion_blocks = nn.ModuleList(
+                [ParallelCoAttentionBlock(config) for _ in range(config.n_enc_layer)]
+            )
+        else:
+            # LATE FUSION (Baseline): Separate encoders for state and action
+            self.state_encoder_blocks = nn.ModuleList(
+                [Block(config) for _ in range(config.n_enc_layer)]
+            )
+            self.action_encoder_blocks = nn.ModuleList(
+                [Block(config) for _ in range(config.n_enc_layer)]
+            )
         
         # Normalization for encoders
         self.state_encoder_norm = nn.LayerNorm(self.n_embd)
@@ -160,6 +169,22 @@ class MaskedDPMultimodal(nn.Module):
                 # Zero-init MLP Output Projection
                 nn.init.zeros_(blk.mlp[2].weight)
                 nn.init.zeros_(blk.mlp[2].bias)
+
+        # Estable Early Fusion with zero init
+        # Same strategy as the fusion block
+        if getattr(self, "use_early_fusion", False):
+            for blk in self.early_fusion_blocks:
+                # Init Stream S
+                nn.init.zeros_(blk.cross_attn_s.proj.weight)
+                nn.init.zeros_(blk.cross_attn_s.proj.bias)
+                nn.init.zeros_(blk.mlp_s[2].weight)
+                nn.init.zeros_(blk.mlp_s[2].bias)
+
+                # Init Stream A
+                nn.init.zeros_(blk.cross_attn_a.proj.weight)
+                nn.init.zeros_(blk.cross_attn_a.proj.bias)
+                nn.init.zeros_(blk.mlp_a[2].weight)
+                nn.init.zeros_(blk.mlp_a[2].bias)
 
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
@@ -422,15 +447,25 @@ class MaskedDPMultimodal(nn.Module):
         s_attn_mask = (s_valid.unsqueeze(2) & s_valid.unsqueeze(1)).unsqueeze(1).to(dtype=torch.float32)
         a_attn_mask = (a_valid.unsqueeze(2) & a_valid.unsqueeze(1)).unsqueeze(1).to(dtype=torch.float32)
         
-        # Process with separate encoders
+        # Process with separate encoders (Early vs Late Fusion)
         s_encoded = s_masked
-        for blk in self.state_encoder_blocks:
-            s_encoded = blk(s_encoded, s_attn_mask)
-        s_encoded = self.state_encoder_norm(s_encoded)
-        
         a_encoded = a_masked
-        for blk in self.action_encoder_blocks:
-            a_encoded = blk(a_encoded, a_attn_mask)
+
+        if self.use_early_fusion:
+            #EARLY FUSION
+            for blk in self.early_fusion_blocks:
+                s_encoded, a_encoded = blk(
+                    x_s=s_encoded, x_a=a_encoded,
+                    mask_s=s_attn_mask, mask_a=a_attn_mask,
+                    pad_mask_s=s_pad_mask_1d, pad_mask_a=a_pad_mask_1d
+                )
+        else:
+            for blk in self.state_encoder_blocks:
+                s_encoded = blk(s_encoded, s_attn_mask)
+            for blk in self.action_encoder_blocks:
+                a_encoded = blk(a_encoded, a_attn_mask)
+
+        s_encoded = self.state_encoder_norm(s_encoded)
         a_encoded = self.action_encoder_norm(a_encoded)
         
         # Fuse and return kept tokens for the decoder
