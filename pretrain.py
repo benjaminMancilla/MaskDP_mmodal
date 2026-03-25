@@ -174,10 +174,8 @@ def main(cfg):
             print(f"--> [Fine-Tuning] resuming global steps: {global_step}")
 
     if cfg.get('load_unimodal', False):
-        assert cfg.pretrained_state_path is not None, \
-            "load_unimodal=True requires pretrained_state_path"
-        assert cfg.pretrained_action_path is not None, \
-            "load_unimodal=True requires pretrained_action_path"
+        assert cfg.pretrained_state_path is not None or cfg.pretrained_action_path is not None, \
+            "load_unimodal=True requires at least one of pretrained_state_path or pretrained_action_path"
         assert not cfg.resume, \
             "Loading unimodales weigths and resuming is disabled"
 
