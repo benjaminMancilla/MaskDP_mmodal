@@ -617,10 +617,12 @@ class MaskedDPMultimodalAgent:
         transformer_cfg,
         freeze_schedule=None,
         train_mode='joint',
-        warmup_steps=0
+        warmup_steps=0,
+        finetune_lr=None,
     ):
         self.action_dim = action_shape[0]
         self.lr = lr
+        self.finetune_lr = finetune_lr if finetune_lr is not None else lr
         self.device = device
         self.use_tb = use_tb
         self.config = transformer_cfg
@@ -670,6 +672,7 @@ class MaskedDPMultimodalAgent:
             return
         
         needs_optimizer_rebuild = False
+        any_module_unfrozen = False
 
         for module_name, (start_step, end_step) in self.freeze_schedule.items():
             module = getattr(self.model, module_name, None)
@@ -684,8 +687,13 @@ class MaskedDPMultimodalAgent:
                 print(f"[{step}] Module '{module_name}' -> {status} (interval: [{start_step}, {end_step}))")
                 self.set_module_requires_grad(module, should_train)
                 needs_optimizer_rebuild = True
+                if should_train:
+                    any_module_unfrozen
                 
         if needs_optimizer_rebuild:
+            if any_module_unfrozen and self.finetune_lr != self.lr:
+                print(f"[{step}] Switching LR: {self.lr} -> {self.finetune_lr} (finetune phase)")
+                self.lr = self.finetune_lr
             self._rebuild_optimizer()
 
     def train(self, training=True):

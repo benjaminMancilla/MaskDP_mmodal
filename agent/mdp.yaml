@@ -5,6 +5,7 @@ obs_shape: ??? # to be specified later
 action_shape: ??? # to be specified later
 device: ${device}
 lr: 1e-4
+finetune_lr: 1e-5
 use_tb: ${use_tb}
 batch_size: 384 # Batch size Table 2
 mask_ratio: [0.15, 0.35, 0.55, 0.75, 0.95]
@@ -44,8 +45,14 @@ train_mode: 'joint'           # 'joint' | 'state_only' | 'action_only'
 #freeze_schedule: {}
 
 freeze_schedule:
+  # state_embed:           [0, 40000000]
   # state_encoder_blocks:  [0, 40000000]
+  # state_encoder_norm:    [0, 40000000]
+
+  # action_embed:          [0, 40000000]
   # action_encoder_blocks: [0, 40000000]
-  early_fusion_blocks: [0, 40000000]
-  # fusion_blocks:         [0     , 200000]
-  # decoder_blocks:        [0     , 150000]
+  # action_encoder_norm:   [0, 40000000]
+
+  # early_fusion_blocks:   [0, 40000000]
+  # fusion_blocks:         [0, 40000000]
+  # decoder_blocks:        [0, 40000000]
