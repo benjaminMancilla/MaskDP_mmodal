@@ -688,7 +688,7 @@ class MaskedDPMultimodalAgent:
                 self.set_module_requires_grad(module, should_train)
                 needs_optimizer_rebuild = True
                 if should_train:
-                    any_module_unfrozen
+                    any_module_unfrozen = True
                 
         if needs_optimizer_rebuild:
             if any_module_unfrozen and self.finetune_lr != self.lr:
