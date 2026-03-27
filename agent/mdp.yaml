@@ -32,6 +32,13 @@ transformer_cfg:
   mlp_ratio: 4
   use_early_fusion: true
 
+  # MLP adapter (finetuning)
+  use_adapter_mlp: false
+  adapter_mlp_ratio: 2          # hidden_dim = n_embd * ratio
+  adapter_mlp_layers: 2
+  adapter_mlp_norm: true
+  adapter_mlp_residual: true
+
   # This stays the same
   embd_pdrop: 0
   resid_pdrop: 0

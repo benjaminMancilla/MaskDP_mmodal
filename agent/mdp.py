@@ -10,7 +10,7 @@ from collections import OrderedDict
 import utils
 from dm_control.utils import rewards
 from einops import rearrange, reduce, repeat
-from agent.modules.attention import Block, CausalSelfAttention, CoAttentionBlock, ParallelCoAttentionBlock
+from agent.modules.attention import Block, CausalSelfAttention, CoAttentionBlock, ParallelCoAttentionBlock, AdapterMLP
 
 
 class MaskedDPMultimodal(nn.Module):
@@ -67,6 +67,22 @@ class MaskedDPMultimodal(nn.Module):
         # Normalization for encoders
         self.state_encoder_norm = nn.LayerNorm(self.n_embd)
         self.action_encoder_norm = nn.LayerNorm(self.n_embd)
+
+        # --------------------------------------------------------------------------
+        # Optional MLP adapter — sits between encoder norms and fusion neck.
+        # When use_adapter_mlp=False both adapters are nn.Identity() (zero overhead).
+        self.use_adapter_mlp = bool(getattr(config, "use_adapter_mlp", False))
+        if self.use_adapter_mlp:
+            _ratio     = int(getattr(config, "adapter_mlp_ratio",    2))
+            _layers    = int(getattr(config, "adapter_mlp_layers",   2))
+            _norm      = bool(getattr(config, "adapter_mlp_norm",    True))
+            _residual  = bool(getattr(config, "adapter_mlp_residual", True))
+            print(f"AdapterMLP ENABLED — ratio={_ratio}, layers={_layers}, norm={_norm}, residual={_residual}")
+            self.state_adapter  = AdapterMLP(self.n_embd, _ratio, _layers, _norm, _residual)
+            self.action_adapter = AdapterMLP(self.n_embd, _ratio, _layers, _norm, _residual)
+        else:
+            self.state_adapter  = nn.Identity()
+            self.action_adapter = nn.Identity()
 
         # --------------------------------------------------------------------------
         # Fusion encoder (cross-modal interaction after separate encoders, before decoder)
@@ -467,6 +483,10 @@ class MaskedDPMultimodal(nn.Module):
 
         s_encoded = self.state_encoder_norm(s_encoded)
         a_encoded = self.action_encoder_norm(a_encoded)
+
+        # Optional adapter — identity when use_adapter_mlp=False
+        s_encoded = self.state_adapter(s_encoded)
+        a_encoded = self.action_adapter(a_encoded)
         
         # Fuse and return kept tokens for the decoder
         x_fused = self.forward_fusion(
