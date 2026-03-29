@@ -178,6 +178,9 @@ class MDP_MM_GoalAgent:
         s_encoded = self.mdp.state_encoder_norm(s_encoded)  # [B, 2, D]
         a_encoded = self.mdp.action_encoder_norm(a_encoded)  # [B, 2, D]
 
+        s_encoded = self.mdp.state_adapter(s_encoded)
+        a_encoded = self.mdp.action_adapter(a_encoded)
+
         # Fusion: combine state and action information
         # Create ids_keep for fusion (interleaved: [0=s0, 1=a0, 2=s_goal, 3=a_goal])
         ids_keep = torch.arange(4, device=self.device).unsqueeze(0).expand(batch_size, -1)
@@ -346,6 +349,9 @@ class MDP_MM_GoalAgent:
 
         s_encoded = self.mdp.state_encoder_norm(s_encoded)
         a_encoded = self.mdp.action_encoder_norm(a_encoded)
+
+        s_encoded = self.mdp.state_adapter(s_encoded)
+        a_encoded = self.mdp.action_adapter(a_encoded)
 
         total_tokens = (num_goals + 1) * 2
         ids_keep = torch.arange(total_tokens, device=self.device).unsqueeze(0).expand(batch_size, -1)
