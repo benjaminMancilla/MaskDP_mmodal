@@ -667,7 +667,13 @@ class MaskedDPMultimodalAgent:
         ).to(device)
         self.mask_ratio = mask_ratio
         # optimizers
-        self.opt = torch.optim.Adam(self.model.parameters(), lr=lr)
+        # Tag the initial group with target_lr so that warmup logic works correctly
+        # even when no freeze_schedule is active (full-model training with warmup).
+        # When a freeze_schedule IS active, _rebuild_optimizer / _add_encoder_param_groups
+        # will replace this at step 0 before any gradient is taken.
+        self.opt = torch.optim.Adam(
+            [{'params': list(self.model.parameters()), 'lr': lr, 'target_lr': lr, 'name': 'all_params'}]
+        )
         print(
             "number of parameters: %e", sum(p.numel() for p in self.model.parameters())
         )
@@ -677,44 +683,138 @@ class MaskedDPMultimodalAgent:
     def set_module_requires_grad(self, module, requires_grad):
         for param in module.parameters():
             param.requires_grad = requires_grad
-            
+
+    def _get_encoder_param_ids(self):
+        # Used to distinguish encoder params from fusion/decoder params when building groups.
+        ids = set()
+        for module_name in self.freeze_schedule:
+            module = getattr(self.model, module_name, None)
+            if module is not None:
+                for p in module.parameters():
+                    ids.add(p.data_ptr())
+        return ids
+
     def _rebuild_optimizer(self):
         """Rebuild optimizer with only trainable parameters"""
-        trainable_params = [p for p in self.model.parameters() if p.requires_grad]
-        print(f"Rebuilding optimizer with {len(trainable_params)} trainable parameter groups")
-        # Note: This resets optimizer state (momentum), which is unavoidable when parameters change.
-        # It also resets LR to self.lr. Warmup logic in update_mdp will handle re-adjusting LR if needed.
-        self.opt = torch.optim.Adam(trainable_params, lr=self.lr)
-            
+        encoder_ids = self._get_encoder_param_ids()
+        encoder_params, other_params = [], []
+
+        for p in self.model.parameters():
+            if not p.requires_grad:
+                continue
+            if p.data_ptr() in encoder_ids:
+                encoder_params.append(p)
+            else:
+                other_params.append(p)
+
+        param_groups = []
+        if other_params:
+            param_groups.append({
+                'params': other_params,
+                'lr': self.lr,
+                'target_lr': self.lr,
+                'name': 'fusion_decoder',
+            })
+        if encoder_params:
+            param_groups.append({
+                'params': encoder_params,
+                'lr': self.finetune_lr,
+                'target_lr': self.finetune_lr,
+                'name': 'encoders',
+            })
+
+        # Fallback: nothing in either bucket (shouldn't happen, but be safe)
+        if not param_groups:
+            param_groups = [{'params': [], 'lr': self.lr, 'target_lr': self.lr, 'name': 'empty'}]
+
+        print(
+            f"[Optimizer] Full rebuild — "
+            f"{len(other_params)} fusion/decoder params @ lr={self.lr}, "
+            f"{len(encoder_params)} encoder params @ lr={self.finetune_lr}"
+        )
+        self.opt = torch.optim.Adam(param_groups)
+
+    def _add_encoder_param_groups(self, newly_unfrozen_names):
+        # Collect all param data_ptrs already tracked by the optimizer
+        existing_ids = set()
+        for grp in self.opt.param_groups:
+            for p in grp['params']:
+                existing_ids.add(p.data_ptr())
+
+        new_params = []
+        for name in newly_unfrozen_names:
+            module = getattr(self.model, name, None)
+            if module is None:
+                continue
+            for p in module.parameters():
+                if p.requires_grad and p.data_ptr() not in existing_ids:
+                    new_params.append(p)
+
+        if not new_params:
+            print(
+                f"[Optimizer] _add_encoder_param_groups: no new params to add "
+                f"(already tracked or empty). Skipping."
+            )
+            return
+
+        self.opt.add_param_group({
+            'params': new_params,
+            'lr': self.finetune_lr,
+            'target_lr': self.finetune_lr,
+            'name': 'encoders',
+        })
+        print(
+            f"[Optimizer] add_param_group — {len(new_params)} encoder params "
+            f"@ lr={self.finetune_lr}. Fusion/decoder Adam state PRESERVED."
+        )
+
+    # ------------------------------------------------------------------
+
     def check_freeze_schedule(self, step):
         """Applies freezing to a block if step is inside an interval [start, end)"""
         if step is None:
             return
-        
-        needs_optimizer_rebuild = False
-        any_module_unfrozen = False
+
+        newly_unfrozen = []   # modules transitioning frozen → trainable
+        needs_full_rebuild = False  # any module transitioning trainable → frozen
 
         for module_name, (start_step, end_step) in self.freeze_schedule.items():
             module = getattr(self.model, module_name, None)
             if module is None:
+                print(f"[Warning] freeze_schedule: module '{module_name}' not found in model.")
                 continue
-            
+
+            params = list(module.parameters())
+            if not params:
+                continue
+
             should_train = not (start_step <= step < end_step)
-            current_status = next(module.parameters()).requires_grad
-            
+            current_status = params[0].requires_grad
+
             if should_train != current_status:
-                status = "TRAINABLE" if should_train else "FROZEN"
-                print(f"[{step}] Module '{module_name}' -> {status} (interval: [{start_step}, {end_step}))")
+                status_str = "TRAINABLE" if should_train else "FROZEN"
+                print(
+                    f"[{step}] Module '{module_name}' -> {status_str} "
+                    f"(schedule: [{start_step}, {end_step}))"
+                )
                 self.set_module_requires_grad(module, should_train)
-                needs_optimizer_rebuild = True
+
                 if should_train:
-                    any_module_unfrozen = True
-                
-        if needs_optimizer_rebuild:
-            if any_module_unfrozen and self.finetune_lr != self.lr:
-                print(f"[{step}] Switching LR: {self.lr} -> {self.finetune_lr} (finetune phase)")
-                self.lr = self.finetune_lr
+                    newly_unfrozen.append(module_name)
+                else:
+                    # Freezing requires full rebuild to drop these params from Adam
+                    needs_full_rebuild = True
+
+        if not newly_unfrozen and not needs_full_rebuild:
+            return  # No state change — nothing to do
+
+        if needs_full_rebuild:
+            # Freeze event (or mixed freeze+unfreeze): full rebuild, momentum lost.
+            # Mixed events are extremely unlikely in normal use (FZ+FT pattern only unfreezes).
             self._rebuild_optimizer()
+        else:
+            # Pure unfreeze event: momentum-preserving add_param_group path.
+            self._add_encoder_param_groups(newly_unfrozen)
 
     def train(self, training=True):
         self.training = training
@@ -724,6 +824,12 @@ class MaskedDPMultimodalAgent:
         self.check_freeze_schedule(step)
         
         # Warmup Logic
+        # Each param_group carries a 'target_lr' key. Warmup scales each group
+        # relative to its own target, so fusion/decoder (lr=1e-4) and encoders
+        # (lr=5e-5) both warm up proportionally — not to a single shared value.
+        # Warmup only fires once (anchored to warmup_start_step), so encoder
+        # params added via add_param_group after the warmup window has elapsed
+        # will correctly start at their full finetune_lr with no warmup applied.
         if step is not None and self.warmup_steps > 0:
             if self.warmup_start_step is None:
                 self.warmup_start_step = step
@@ -731,17 +837,17 @@ class MaskedDPMultimodalAgent:
             steps_since_start = step - self.warmup_start_step
             
             if steps_since_start < self.warmup_steps:
-                # Linear Warmup: from almost 0 to self.lr
-                # (steps_since_start + 1) avoids 0 LR if we want to start strictly > 0
+                # Linear warmup: scale each group by the same factor, but relative
+                # to that group's own target_lr (not a single global self.lr).
                 warmup_factor = (steps_since_start + 1) / float(self.warmup_steps)
-                current_lr = self.lr * warmup_factor
                 for param_group in self.opt.param_groups:
-                    param_group['lr'] = current_lr
+                    target = param_group.get('target_lr', self.lr)
+                    param_group['lr'] = target * warmup_factor
             
             elif steps_since_start == self.warmup_steps:
-                # Ensure we hit the exact target LR at the end of warmup
+                # Snap each group to its exact target_lr at the end of warmup
                 for param_group in self.opt.param_groups:
-                    param_group['lr'] = self.lr
+                    param_group['lr'] = param_group.get('target_lr', self.lr)
 
         metrics = dict()
         mask_ratio = np.random.choice(self.mask_ratio)
