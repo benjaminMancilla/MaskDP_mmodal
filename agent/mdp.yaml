@@ -11,7 +11,14 @@ batch_size: 384 # Batch size Table 2
 mask_ratio: [0.15, 0.35, 0.55, 0.75, 0.95]
 transformer_cfg:
   # Hparams from paper (Table 2)
-  traj_length: 64             # context length
+  traj_length: 64            # max context length — sets model max_len and dataloader window size
+  traj_lengths: [8, 16, 32, 64]     # temporal jitter: null = disabled (original behavior)
+                                    # or a list of discrete lengths to sample from, e.g. [8, 16, 32, 64, 128]
+                                    # the last element must equal traj_length (used as full-T reference)
+  jitter_strategy: 'mix50'   # sampling strategy — only used when traj_lengths is not null:
+                              #   'mix50'       — 50% full T (last element), 50% uniform from list
+                              #   'uniform'     — uniform sampling from list
+                              #   'uniform_log' — weighted sampling with w_i = 1/T_i (favors short T)
   n_embd: 256                 # hidden dim
   n_head: 4                   # attention heads
   n_enc_layer: 2              # encoder layers
@@ -30,7 +37,7 @@ transformer_cfg:
 
   # Early fusion encoder
   mlp_ratio: 4
-  use_early_fusion: true
+  use_early_fusion: false
 
   # MLP adapter (finetuning)
   use_adapter_mlp: false

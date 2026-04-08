@@ -28,6 +28,22 @@ class MaskedDPMultimodal(nn.Module):
         # MAE encoder specifics
         self.n_embd = config.n_embd
         self.max_len = config.traj_length * 2
+        # Temporal jitter configuration
+        raw_traj_lengths = getattr(config, "traj_lengths", None)
+        self.jitter_strategy = str(getattr(config, "jitter_strategy", "mix50"))
+
+        if raw_traj_lengths is not None:
+            self.traj_lengths = [int(t) for t in raw_traj_lengths]
+            assert len(self.traj_lengths) >= 1, "traj_lengths must have at least one element"
+            assert all(t >= 1 for t in self.traj_lengths), "all traj_lengths must be >= 1"
+            assert all(t <= config.traj_length for t in self.traj_lengths), \
+                f"all traj_lengths must be <= traj_length ({config.traj_length}). Got: {self.traj_lengths}"
+            assert self.jitter_strategy in ('mix50', 'uniform', 'uniform_log'), \
+                f"jitter_strategy must be 'mix50', 'uniform', or 'uniform_log'. Got: '{self.jitter_strategy}'"
+            print(f"Temporal Jitter ENABLED: strategy='{self.jitter_strategy}', T candidates={self.traj_lengths}")
+        else:
+            self.traj_lengths = None
+            print(f"Temporal Jitter DISABLED: fixed T={config.traj_length}")
         # self.mask_ratio = config.mask_ratio
         self.pe = config.pe
         self.norm = config.norm
@@ -369,6 +385,32 @@ class MaskedDPMultimodal(nn.Module):
                 x = self.fusion_norm(x)
 
             return x
+
+    def _sample_jitter_T(self) -> int:
+        """Sample an effective trajectory length from the discrete traj_lengths list.
+
+        Strategies:
+            mix50       : 50% returns traj_lengths[-1] (full T), 50% uniform from list.
+            uniform     : uniform sampling from list — all lengths equally likely.
+            uniform_log : weighted by w_i = 1/T_i, normalized — strongly favors short T.
+
+        The last element of traj_lengths is treated as the full-T reference (used by mix50).
+        Always call this only when traj_lengths is not None and model is in training mode.
+        """
+        if self.jitter_strategy == 'mix50':
+            if np.random.rand() < 0.5:
+                return self.traj_lengths[-1]
+            return int(np.random.choice(self.traj_lengths))
+
+        if self.jitter_strategy == 'uniform':
+            return int(np.random.choice(self.traj_lengths))
+
+        if self.jitter_strategy == 'uniform_log':
+            weights = 1.0 / np.array(self.traj_lengths, dtype=float)
+            weights /= weights.sum()
+            return int(np.random.choice(self.traj_lengths, p=weights))
+
+        return self.traj_lengths[-1]  # fallback
 
     def forward_encoder(self, states, actions, mask_ratio):
         """MAE-style encoder with separate state and action streams."""
@@ -851,7 +893,17 @@ class MaskedDPMultimodalAgent:
 
         metrics = dict()
         mask_ratio = np.random.choice(self.mask_ratio)
-        
+
+        # Temporal jitter: sample T_eff from the discrete traj_lengths list and truncate
+        # the batch before the forward pass. T is constant within a batch to avoid
+        # variable-length collation issues. T is already fully dynamic throughout
+        # forward_encoder and forward_decoder (all shapes derived from states.size(1)),
+        # so no other changes are needed.
+        if self.model.traj_lengths is not None and self.training:
+            T_eff = self.model._sample_jitter_T()
+            states  = states[:, :T_eff, :]
+            actions = actions[:, :T_eff, :]
+
         # Encoder (dual + optional fusion)
         x_fused, mask, ids_restore, ids_keep = \
             self.model.forward_encoder(states, actions, mask_ratio)
