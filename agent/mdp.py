@@ -17,9 +17,9 @@ from agent.modules.attention import Block, CausalSelfAttention, CoAttentionBlock
 class MaskedDPMultimodal(nn.Module):
 
     def _embed_states(self, states: torch.Tensor) -> torch.Tensor:
-    if self.pixel_encoder is not None:
-        return self.pixel_encoder(states)
-    return self.state_embed(states)
+        if self.pixel_encoder is not None:
+            return self.pixel_encoder(states)
+        return self.state_embed(states)
 
     def __init__(self, obs_dim, action_dim, config, train_mode='joint'):
         super().__init__()
