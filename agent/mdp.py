@@ -10,10 +10,17 @@ from collections import OrderedDict
 import utils
 from dm_control.utils import rewards
 from einops import rearrange, reduce, repeat
+from agent.modules.pixel_encoder import PixelEncoder
 from agent.modules.attention import Block, CausalSelfAttention, CoAttentionBlock, ParallelCoAttentionBlock, AdapterMLP
 
 
 class MaskedDPMultimodal(nn.Module):
+
+    def _embed_states(self, states: torch.Tensor) -> torch.Tensor:
+    if self.pixel_encoder is not None:
+        return self.pixel_encoder(states)
+    return self.state_embed(states)
+
     def __init__(self, obs_dim, action_dim, config, train_mode='joint'):
         super().__init__()
         # Pretrain configuration
@@ -48,7 +55,14 @@ class MaskedDPMultimodal(nn.Module):
         self.pe = config.pe
         self.norm = config.norm
         print("norm", self.norm)
-        self.state_embed = nn.Linear(obs_dim, self.n_embd)
+        self.use_pixel_obs = getattr(config, "use_pixel_obs", False)
+        if self.use_pixel_obs:
+            pixel_obs_shape = tuple(config.pixel_obs_shape)  # (64, 64, 3)
+            self.pixel_encoder = PixelEncoder(pixel_obs_shape, self.n_embd)
+            self.state_embed = nn.Identity()
+        else:
+            self.pixel_encoder = None
+            self.state_embed = nn.Linear(obs_dim, self.n_embd)
         self.action_embed = nn.Linear(action_dim, self.n_embd)
         
         # Modality droupout
@@ -424,7 +438,7 @@ class MaskedDPMultimodal(nn.Module):
         batch_size, T, obs_dim = states.size()
         
         # Embeddings
-        s_emb = self.state_embed(states)
+        s_emb = self._embed_states(states)
         a_emb = self.action_embed(actions)
         
         # Base:

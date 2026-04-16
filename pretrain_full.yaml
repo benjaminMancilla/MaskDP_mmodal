@@ -8,7 +8,7 @@ task: cheetah_run
 discount: 0.99
 
 # train settings
-num_grad_steps: 400010
+num_grad_steps: 500010
 log_every_steps: 1000
 
 # eval

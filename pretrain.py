@@ -146,7 +146,9 @@ def main(cfg):
     device = torch.device(cfg.device)
 
     # create envs
-    env = dmc.make(cfg.task, seed=cfg.seed)
+    obs_type   = cfg.get("obs_type", "states")
+    pixel_size = cfg.get("pixel_size", 84)
+    env = dmc.make(cfg.task, seed=cfg.seed, obs_type=obs_type, pixel_size=pixel_size)
 
     # create agent
     agent = hydra.utils.instantiate(
