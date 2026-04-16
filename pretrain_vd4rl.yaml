@@ -24,14 +24,15 @@ resume: false
 resume_dir: none
 resume_step: 0
 
-replay_buffer_dir: /path/to/vd4rl_data/main/cheetah_run/expert/64px
+use_raw_replay_dir: true
+replay_buffer_dir: /home/bmancilla/archive/MaskDP/v_d4rl_data/main/cheetah_run/expert/64px
 replay_buffer_size: 500000         # V-D4RL has less episodes
 replay_buffer_num_workers: 8
 batch_size: ${agent.batch_size}
 
 # dataset GOAL EVALUATION
 # IMPORTANT: with out physics, start states will be random
-goal_buffer_dir: /path/to/vd4rl_data/main/cheetah_run/expert/64px
+goal_buffer_dir: null
 goal_buffer_size: 50000
 goal_buffer_num_workers: 4
 num_goal_eval_episodes: 20

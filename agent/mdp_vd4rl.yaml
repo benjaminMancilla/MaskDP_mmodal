@@ -12,7 +12,7 @@ mask_ratio: [0.15, 0.35, 0.55, 0.75, 0.95]
 transformer_cfg:
   # Hparams from paper (Table 2)
   traj_length: 64            # max context length — sets model max_len and dataloader window size
-  traj_lengths: [8, 16, 32, 64]     # temporal jitter: null = disabled (original behavior)
+  traj_lengths: null     # temporal jitter: null = disabled (original behavior)
                                     # or a list of discrete lengths to sample from, e.g. [8, 16, 32, 64, 128]
                                     # the last element must equal traj_length (used as full-T reference)
   jitter_strategy: 'mix50'   # sampling strategy — only used when traj_lengths is not null:
@@ -28,7 +28,7 @@ transformer_cfg:
   use_fusion_type_embed: true # use fusion encoder bool (is optional)
   fusion_type: 'cross'        # 'self' | 'cross' | 'none' # fusion encoder type
 
-  modality_dropout: true      # use modality dropout bool
+  modality_dropout: false      # use modality dropout bool
   modality_dropout_prob: 0.25 # modality dropout prob
   state_dropout_prob:  0.0    # state dropout prob (if modality dropout is used)
   action_dropout_prob: 1.0    # action dropout prob (if modality dropout is used)

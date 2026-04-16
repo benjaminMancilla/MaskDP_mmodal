@@ -25,6 +25,7 @@ resume_dir: none
 resume_step: 0
 
 # dataset TRAIN
+use_raw_replay_dir: false
 replay_buffer_dir: /home/bmancilla/archive/maskdp_data/maskdp_train
 replay_buffer_size: 2000000
 replay_buffer_num_workers: 16

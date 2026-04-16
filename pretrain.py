@@ -276,7 +276,10 @@ def main(cfg):
             print("--> Continuing training without previous history...")
 
     # Create TRAIN replay loader
-    replay_train_dir = Path(cfg.replay_buffer_dir) / domain
+    if cfg.get("use_raw_replay_dir", False):
+        replay_train_dir = Path(cfg.replay_buffer_dir)
+    else:
+        replay_train_dir = Path(cfg.replay_buffer_dir) / domain
     print(f"replay dir: {replay_train_dir}")
     train_loader = make_replay_loader(
         env,
