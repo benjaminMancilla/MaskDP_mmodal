@@ -29,6 +29,18 @@ def load_episode(fn, domain, obs):
     with fn.open("rb") as f:
         episode = np.load(f)
         episode = {k: episode[k] for k in episode.keys()}
+
+        if "image" in episode and "observation" not in episode:
+            episode["observation"] = episode.pop("image")
+
+        for key in ("reward", "discount"):
+            if key in episode and episode[key].ndim == 1:
+                episode[key] = episode[key][:, np.newaxis].astype(np.float32)
+
+        if "physics" not in episode:
+            n = episode["observation"].shape[0]
+            episode["physics"] = np.zeros((n, 18), dtype=np.float64)
+
         return episode
 
 
@@ -91,11 +103,10 @@ class OfflineReplayBuffer(IterableDataset):
         eps_fns = sorted(
             self._replay_dir.rglob("*.npz")
         )  # get all episodes recursively
-        for eps_fn in eps_fns:
+        for eps_idx, eps_fn in enumerate(eps_fns):
             if self._size > self._max_size:
                 print("over size", self._max_size)
                 break
-            eps_idx, eps_len = [int(x) for x in eps_fn.stem.split("_")[1:]]
             if eps_idx % self._num_workers != worker_id:
                 continue
             episode = load_episode(eps_fn, self._domain, self._obs)
@@ -129,9 +140,11 @@ class OfflineReplayBuffer(IterableDataset):
 
     def _sample_goal(self):
         episode = self._sample_episode()
+        ep_len = episode_len(episode)
+        max_start = max(1, ep_len - 30)
         # add +1 for the first dummy transition
-        start_idx = np.random.randint(0, 900)
-        length = np.random.randint(15, 20)
+        start_idx = np.random.randint(0, max_start)
+        length = np.random.randint(15, min(20, ep_len - start_idx))
         start_obs = episode["observation"][start_idx]
         start_physics = episode["physics"][start_idx]
         goal_obs = episode["observation"][start_idx + length - 1]
@@ -142,8 +155,10 @@ class OfflineReplayBuffer(IterableDataset):
 
     def _sample_multiple_goal(self):
         episode = self._sample_episode()
+        ep_len = episode_len(episode)
+        max_start = max(1, ep_len - time_budget[-1] - 2)
         # add +1 for the first dummy transition
-        start_idx = np.random.randint(0, 850)
+        start_idx = np.random.randint(0, max_start)
         time_budget = np.array([12, 24, 36, 48, 60])
 
         start_obs = episode["observation"][start_idx]
