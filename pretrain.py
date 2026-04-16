@@ -291,6 +291,9 @@ def main(cfg):
         domain,
         cfg.agent.transformer_cfg.traj_length,
         relabel=False,
+        file_split=cfg.get("train_file_split", "all"),
+        train_ratio=cfg.get("train_ratio", 0.8),
+        eval_ratio=cfg.get("eval_ratio", 0.1),
     )
     train_iter = iter(train_loader)
     
@@ -313,6 +316,9 @@ def main(cfg):
                 mode="goal",
                 cfg=cfg.agent.transformer_cfg,
                 relabel=False,
+                file_split=cfg.get("eval_file_split", "all"),
+                train_ratio=cfg.get("train_ratio", 0.8),
+                eval_ratio=cfg.get("eval_ratio", 0.1),
             )
             goal_iter = iter(goal_loader)
             video_recorder = VideoRecorder(work_dir if cfg.save_video else None)

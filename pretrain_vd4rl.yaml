@@ -7,6 +7,13 @@ defaults:
 task: cheetah_run
 discount: 0.99
 
+# Split configuration
+train_file_split: "train"
+eval_file_split: "eval"
+train_ratio: 0.8
+eval_ratio: 0.1
+bc_ratio: 0.1
+
 # train settings
 num_grad_steps: 400010
 log_every_steps: 1000
