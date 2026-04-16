@@ -60,6 +60,10 @@ class MaskedDPMultimodal(nn.Module):
             pixel_obs_shape = tuple(config.pixel_obs_shape)  # (64, 64, 3)
             self.pixel_encoder = PixelEncoder(pixel_obs_shape, self.n_embd)
             self.state_embed = nn.Identity()
+            # Freeze CNN — FIXED representations for CNN placeholder
+            trainable = sum(p.numel() for p in self.pixel_encoder.parameters() if p.requires_grad)
+            total = sum(p.numel() for p in self.pixel_encoder.parameters())
+            print(f"[PixelEncoder] Trainable params: {trainable}/{total} (should be ~131k/11M)")
         else:
             self.pixel_encoder = None
             self.state_embed = nn.Linear(obs_dim, self.n_embd)
@@ -156,10 +160,11 @@ class MaskedDPMultimodal(nn.Module):
             nn.Linear(self.n_embd, action_dim),
             nn.Tanh(),
         )  # decoder to patch
+        self.state_pred_dim = self.n_embd if self.use_pixel_obs else obs_dim
         self.state_head = nn.Sequential(
             nn.LayerNorm(self.n_embd),
             nn.ReLU(inplace=True),
-            nn.Linear(self.n_embd, obs_dim),
+            nn.Linear(self.n_embd, self.state_pred_dim),
         )
         # --------------------------------------------------------------------------
         self.initialize_weights()
@@ -435,7 +440,7 @@ class MaskedDPMultimodal(nn.Module):
         elif self.train_mode == 'action_only':
             states = torch.full_like(states, self.pad_value)
 
-        batch_size, T, obs_dim = states.size()
+        batch_size, T = states.shape[0], states.shape[1]
         
         # Embeddings
         s_emb = self._embed_states(states)
@@ -608,7 +613,7 @@ class MaskedDPMultimodal(nn.Module):
 
             # dummy for states
             a_pred = self.action_head(x_dec[:, 1::2])
-            s_pred = torch.zeros(batch_size, total_len // 2, self.obs_dim, device=x.device)
+            s_pred = torch.zeros(batch_size, total_len // 2, self.state_pred_dim, device=x.device)
         
         else:  # 'joint'
             # Project to decoder embedding space
@@ -915,8 +920,8 @@ class MaskedDPMultimodalAgent:
         # so no other changes are needed.
         if self.model.traj_lengths is not None and self.training:
             T_eff = self.model._sample_jitter_T()
-            states  = states[:, :T_eff, :]
-            actions = actions[:, :T_eff, :]
+            states  = states[:, :T_eff]
+            actions = actions[:, :T_eff]
 
         # Encoder (dual + optional fusion)
         x_fused, mask, ids_restore, ids_keep = \
@@ -928,8 +933,21 @@ class MaskedDPMultimodalAgent:
         )
         
         # Loss
+        with torch.no_grad():
+            target_s = self.model._embed_states(states)  # (B, T, n_embd)
+
+        # DEBUG — remover después de verificar
+        if step % 5000 == 0:
+            norms = torch.norm(target_s, dim=-1)  # debería ser ~1.0 por L2 norm
+            sim = torch.nn.functional.cosine_similarity(
+                target_s[:, 0].unsqueeze(1),   # primer frame
+                target_s[:, 1:],               # resto de frames
+                dim=-1
+            ).mean()
+            print(f"[DEBUG step={step}] embedding norm: {norms.mean():.4f} ± {norms.std():.4f} | inter-frame cosine sim: {sim:.4f}")
+        
         mask_loss, state_loss, action_loss = self.model.forward_loss(
-            states, actions, pred_s, pred_a, mask
+            target_s, actions, pred_s, pred_a, mask
         )
         
         if self.config.loss == "masked":
