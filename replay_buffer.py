@@ -254,6 +254,7 @@ def make_replay_loader(
     file_split="all",
     train_ratio=0.8,
     eval_ratio=0.1,
+    bc_ratio=0.1,
 ):
     max_size_per_worker = max_size // max(1, num_workers)
 
@@ -272,6 +273,7 @@ def make_replay_loader(
         file_split=file_split,
         train_ratio=train_ratio,
         eval_ratio=eval_ratio,
+        bc_ratio=bc_ratio,
     )
 
     loader = torch.utils.data.DataLoader(

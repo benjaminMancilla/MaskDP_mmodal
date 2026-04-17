@@ -23,8 +23,10 @@ eval_every_steps: 25000
 num_eval_episodes: 10
 
 # snapshot
-snapshots: [0, 50000, 100000, 200000, 300000, 400000]
-snapshot_dir: /home/bmancilla/archive/maskdp_snapshots_vd4rl
+snapshots: [0, 25000, 50000, 75000, 100000, 
+  125000, 150000, 175000, 200000, 225000, 250000, 275000, 300000, 
+  325000, 350000, 375000, 400000]
+snapshot_dir: /home/bmancilla/archive/MaskDP/maskdp_snapshots_vd4rl/
 
 # resume
 resume: false

@@ -280,7 +280,12 @@ def main(cfg):
         replay_train_dir = Path(cfg.replay_buffer_dir)
     else:
         replay_train_dir = Path(cfg.replay_buffer_dir) / domain
+
     print(f"replay dir: {replay_train_dir}")
+    print(f"[DataLoader] train_file_split={cfg.get('train_file_split', 'all')} | "
+      f"train={cfg.get('train_ratio', 0.8)} eval={cfg.get('eval_ratio', 0.1)} "
+      f"bc={cfg.get('bc_ratio', 0.1)}")
+
     train_loader = make_replay_loader(
         env,
         replay_train_dir,
@@ -294,6 +299,7 @@ def main(cfg):
         file_split=cfg.get("train_file_split", "all"),
         train_ratio=cfg.get("train_ratio", 0.8),
         eval_ratio=cfg.get("eval_ratio", 0.1),
+        bc_ratio=cfg.get("bc_ratio", 0.1),
     )
     train_iter = iter(train_loader)
     

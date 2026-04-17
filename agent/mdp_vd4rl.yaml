@@ -7,7 +7,7 @@ device: ${device}
 lr: 1e-4
 finetune_lr: 1e-5
 use_tb: ${use_tb}
-batch_size: 384 # Batch size Table 2
+batch_size: 32 # Batch size Table 2
 mask_ratio: [0.15, 0.35, 0.55, 0.75, 0.95]
 transformer_cfg:
   # Hparams from paper (Table 2)
