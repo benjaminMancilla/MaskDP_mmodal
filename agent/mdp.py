@@ -63,7 +63,7 @@ class MaskedDPMultimodal(nn.Module):
             # Freeze CNN — FIXED representations for CNN placeholder
             trainable = sum(p.numel() for p in self.pixel_encoder.parameters() if p.requires_grad)
             total = sum(p.numel() for p in self.pixel_encoder.parameters())
-            print(f"[PixelEncoder] Trainable params: {trainable}/{total} (should be ~131k/11M)")
+            print(f"[PixelEncoder] Trainable params: {trainable}/{total}")
         else:
             self.pixel_encoder = None
             self.state_embed = nn.Linear(obs_dim, self.n_embd)
@@ -638,6 +638,11 @@ class MaskedDPMultimodal(nn.Module):
 
     def forward_loss(self, target_s, target_a, pred_s, pred_a, mask):
         batch_size, T, _ = target_s.size()
+
+        with torch.no_grad():
+            target_norm = torch.norm(target_s, dim=-1).mean().item()
+            pred_norm = torch.norm(pred_s, dim=-1).mean().item()
+            print(f"[NORM CHECK] target_s: {target_norm:.4f} | pred_s: {pred_norm:.4f}")
         
         # State normalization
         if self.norm == "l2":
