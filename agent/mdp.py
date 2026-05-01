@@ -26,7 +26,16 @@ class MaskedDPMultimodal(nn.Module):
         # Prefer a value that will never appear in real embedded tokens.
         self.pad_value = float(getattr(config, "pad_value", 1e9))
         # MAE encoder specifics
+        # Hidden for decoder and fusion neck
         self.n_embd = config.n_embd
+        # Hidden dim for unimodal encoders
+        self.enc_n_embd = int(getattr(config, 'enc_n_embd', config.n_embd))
+        # Projection layer for encoder -> neck n_emb difference
+        self._has_enc_proj = (self.enc_n_embd != self.n_embd)
+        if self._has_enc_proj:
+            print(f"R2 mode: enc_n_embd={self.enc_n_embd}, n_embd(fusion/dec)={self.n_embd}")
+            assert self.n_embd % config.n_head == 0, "n_embd must be divisible by n_head"
+            assert self.enc_n_embd % config.n_head == 0, "enc_n_embd must be divisible by n_head"
         self.max_len = config.traj_length * 2
         # Temporal jitter configuration
         raw_traj_lengths = getattr(config, "traj_lengths", None)
@@ -48,8 +57,8 @@ class MaskedDPMultimodal(nn.Module):
         self.pe = config.pe
         self.norm = config.norm
         print("norm", self.norm)
-        self.state_embed = nn.Linear(obs_dim, self.n_embd)
-        self.action_embed = nn.Linear(action_dim, self.n_embd)
+        self.state_embed = nn.Linear(obs_dim, self.enc_n_embd)
+        self.action_embed = nn.Linear(action_dim, self.enc_n_embd)
         
         # Modality droupout
         self.modality_dropout = bool(getattr(config, "modality_dropout", True))
@@ -73,16 +82,34 @@ class MaskedDPMultimodal(nn.Module):
             )
         else:
             # LATE FUSION (Baseline): Separate encoders for state and action
+            if self._has_enc_proj:
+                from omegaconf import OmegaConf
+                _enc_cfg_dict = OmegaConf.to_container(config, resolve=True)
+                _enc_cfg_dict['n_embd'] = self.enc_n_embd
+                enc_config = OmegaConf.create(_enc_cfg_dict)
+            else:
+                enc_config = config
+
             self.state_encoder_blocks = nn.ModuleList(
-                [Block(config) for _ in range(config.n_enc_layer)]
+                [Block(enc_config) for _ in range(config.n_enc_layer)]
             )
             self.action_encoder_blocks = nn.ModuleList(
-                [Block(config) for _ in range(config.n_enc_layer)]
+                [Block(enc_config) for _ in range(config.n_enc_layer)]
             )
         
         # Normalization for encoders
-        self.state_encoder_norm = nn.LayerNorm(self.n_embd)
-        self.action_encoder_norm = nn.LayerNorm(self.n_embd)
+        self.state_encoder_norm = nn.LayerNorm(self.enc_n_embd)
+        self.action_encoder_norm = nn.LayerNorm(self.enc_n_embd)
+
+        # --------------------------------------------------------------------------
+        # Projection enc_n_embd -> n_embd (indetity if no reduction)
+        # Sits between encoder norms and the optional adapter / fusion neck.
+        if self._has_enc_proj:
+            self.state_proj  = nn.Linear(self.enc_n_embd, self.n_embd)
+            self.action_proj = nn.Linear(self.enc_n_embd, self.n_embd)
+        else:
+            self.state_proj  = nn.Identity()
+            self.action_proj = nn.Identity()
 
         # --------------------------------------------------------------------------
         # Optional MLP adapter — sits between encoder norms and fusion neck.
@@ -158,13 +185,15 @@ class MaskedDPMultimodal(nn.Module):
     def initialize_weights(self):
         # Positional embeddings SHOULD NOT be separated, this actually breaks the
         # original trayectory order
-        pos_embed = utils.get_1d_sincos_pos_embed_from_grid(self.n_embd, self.max_len)
-        pe = torch.from_numpy(pos_embed).float().unsqueeze(0) / 2.0
+        enc_pe = utils.get_1d_sincos_pos_embed_from_grid(self.enc_n_embd, self.max_len)
+        enc_pe = torch.from_numpy(enc_pe).float().unsqueeze(0) / 2.0
         
-        self.register_buffer("pos_embed", pe)
+        self.register_buffer("pos_embed", enc_pe)
         
         # For decoder we use full pos_embed
-        self.register_buffer("decoder_pos_embed", pe)
+        dec_pe = utils.get_1d_sincos_pos_embed_from_grid(self.n_embd, self.max_len)
+        dec_pe = torch.from_numpy(dec_pe).float().unsqueeze(0) / 2.0
+        self.register_buffer("decoder_pos_embed", dec_pe)
         
         self.register_buffer(
             "attn_mask", torch.ones(self.max_len, self.max_len)[None, None, ...]
@@ -444,7 +473,7 @@ class MaskedDPMultimodal(nn.Module):
         a_emb = a_emb + self.pos_embed[:, 1:2*T:2, :]
 
         # Interleave states and actions: [s0, a0, s1, a1, s2, a2, ...]
-        x = torch.stack([s_emb, a_emb], dim=2).reshape(batch_size, 2 * T, self.n_embd)
+        x = torch.stack([s_emb, a_emb], dim=2).reshape(batch_size, 2 * T, self.enc_n_embd)
         noise = torch.rand(batch_size, 2 * T, device=states.device)
         
         # Modality Dropout (only during training)
@@ -523,8 +552,12 @@ class MaskedDPMultimodal(nn.Module):
             for blk in self.action_encoder_blocks:
                 a_encoded = blk(a_encoded, a_attn_mask)
 
-        s_encoded = self.state_encoder_norm(s_encoded)
-        a_encoded = self.action_encoder_norm(a_encoded)
+        s_encoded = self.state_encoder_norm(s_encoded)   # [B, Ls, enc_n_embd]
+        a_encoded = self.action_encoder_norm(a_encoded)   # [B, La, enc_n_embd]
+
+        # Project enc_n_embd -> n_embd
+        s_encoded = self.state_proj(s_encoded)            # [B, Ls, n_embd]
+        a_encoded = self.action_proj(a_encoded)            # [B, La, n_embd]
 
         # Optional adapter — identity when use_adapter_mlp=False
         s_encoded = self.state_adapter(s_encoded)
