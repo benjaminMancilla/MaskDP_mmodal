@@ -37,7 +37,7 @@ goal_buffer_num_workers: 4
 num_goal_eval_episodes: 20
 
 # Surgery settings
-load_unimodal: true
+load_unimodal: false
 pretrained_state_path: "/home/bmancilla/archive/MaskDP/maskdp_snapshots/weights/unimodal/state/snapshot_100000.pt"
 pretrained_action_path: "/home/bmancilla/archive/MaskDP/maskdp_snapshots/weights/unimodal/action/snapshot_100000.pt"
 
