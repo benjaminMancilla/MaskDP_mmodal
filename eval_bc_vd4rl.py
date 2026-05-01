@@ -106,6 +106,9 @@ def main(cfg):
         path=pretrain_path,
     )
 
+    cfg.agent.obs_shape = list(obs_shape)
+    cfg.agent.action_shape = list(action_shape)
+
     # Logger + WandB
     exp_name = str(cfg.exp_name)
     wandb_config = omegaconf.OmegaConf.to_container(cfg, resolve=True, throw_on_missing=True)
@@ -134,7 +137,7 @@ def main(cfg):
         domain,
         cfg.agent.context_length,
         relabel=False,
-        file_split="bc",
+        file_split=cfg.get("file_split", "all"),
         train_ratio=cfg.get("train_ratio", 0.8),
         eval_ratio=cfg.get("eval_ratio", 0.1),
         bc_ratio=cfg.get("bc_ratio", 0.1),
@@ -142,7 +145,10 @@ def main(cfg):
     bc_iter = iter(bc_loader)
 
     # Snapshot dir for BC head weights
-    snapshot_dir = work_dir / Path(cfg.snapshot_dir) / domain / str(cfg.seed)
+    if cfg.get("resume", False):
+        snapshot_dir = Path(cfg.snapshot_dir) / domain / str(cfg.seed)
+    else:
+        snapshot_dir = work_dir / Path(cfg.snapshot_dir) / domain / str(cfg.seed)
     snapshot_dir.mkdir(exist_ok=True, parents=True)
 
     # Training + eval loop
