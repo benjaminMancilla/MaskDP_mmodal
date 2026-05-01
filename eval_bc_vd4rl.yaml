@@ -8,6 +8,7 @@ task: cheetah_run
 discount: 0.99
 obs_type: pixels
 pixel_size: 64
+file_split: "all" 
 
 # pretrained MaskDP snapshot (REQUIRED)
 pretrain_path: ???
@@ -15,20 +16,21 @@ pretrain_path: ???
 # BC finetuning data — split bc (10%)
 replay_buffer_dir: /home/bmancilla/archive/MaskDP/v_d4rl_data/main/cheetah_run/expert/64px
 replay_buffer_size: 100000
-replay_buffer_num_workers: 4
-batch_size: 64
+replay_buffer_num_workers: 2
+batch_size: 256
 train_ratio: 0.8
 eval_ratio: 0.1
 bc_ratio: 0.1
 
 # training
-num_grad_steps: 50000
-log_every_steps: 500
-eval_every_steps: 5000
+num_grad_steps: 100000
+log_every_steps: 1000
+eval_every_steps: 10000
 num_eval_episodes: 10
+context_length: 1 
 
 # snapshots
-snapshots: [10000, 25000, 50000]
+snapshots: [10000, 25000, 50000, 75000, 100000, 200000, 300000, 400000, 500000]
 snapshot_dir: /home/bmancilla/archive/maskdp_snapshots_vd4rl/bc
 
 # misc
