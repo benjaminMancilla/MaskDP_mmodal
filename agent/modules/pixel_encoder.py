@@ -7,7 +7,7 @@ class PixelEncoder(nn.Module):
     """
     CNN placeholder backbone for pixel based observations.
     Pretrained with RestNet18 (ImageNet)
-    Frozen weights except the final projection.
+    Fully frozen, backbone and projection are fixed feature extractors.
     Input:  (B, T, H, W, C)  uint8 — replay buffer format
     Output: (B, T, feature_dim)  float32
     """
@@ -29,11 +29,15 @@ class PixelEncoder(nn.Module):
         for param in self.backbone.parameters():
             param.requires_grad = False
 
-        # Only the last projection is trainable
+        # Last projection layer
         self.projection = nn.Sequential(
             nn.Linear(self.conv_out_dim, feature_dim),
             nn.LayerNorm(feature_dim),
         )
+
+        # Freeze projection too
+        for param in self.projection.parameters():
+            param.requires_grad = False
 
     def forward(self, obs: torch.Tensor) -> torch.Tensor:
         """
