@@ -194,7 +194,10 @@ def main(cfg):
         agent.model.load_state_dict(payload["model"])
 
     domain = get_domain(cfg.task)
-    snapshot_dir = work_dir / Path(cfg.snapshot_dir) / domain / str(cfg.seed)
+    if cfg.get("resume", False):
+        snapshot_dir = Path(cfg.snapshot_dir) / domain / str(cfg.seed)
+    else:
+        snapshot_dir = work_dir / Path(cfg.snapshot_dir) / domain / str(cfg.seed)
     snapshot_dir.mkdir(exist_ok=True, parents=True)
 
     # create logger
