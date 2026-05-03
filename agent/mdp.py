@@ -111,6 +111,9 @@ class MaskedDPMultimodal(nn.Module):
             self.state_proj  = nn.Identity()
             self.action_proj = nn.Identity()
 
+        if self._has_enc_proj:
+            self.enc_mask_token = nn.Parameter(torch.zeros(1, 1, self.enc_n_embd))
+
         # --------------------------------------------------------------------------
         # Optional MLP adapter — sits between encoder norms and fusion neck.
         # When use_adapter_mlp=False both adapters are nn.Identity() (zero overhead).
@@ -202,6 +205,8 @@ class MaskedDPMultimodal(nn.Module):
         # timm's trunc_normal_(std=.02) is effectively normal_(std=0.02) as cutoff is too big (2.)
         # Init mask tokens
         torch.nn.init.normal_(self.mask_token, std=0.02)
+        if hasattr(self, 'enc_mask_token'):
+            torch.nn.init.normal_(self.enc_mask_token, std=0.02)
         if self.fusion_type_embed is not None:
             torch.nn.init.normal_(self.fusion_type_embed.weight, std=0.02)
         

@@ -89,6 +89,8 @@ class MDP_MM_GoalAgent:
                     self.mdp.state_encoder_norm,
                     self.mdp.action_encoder_blocks, 
                     self.mdp.action_encoder_norm,
+                    self.mdp.state_proj,
+                    self.mdp.action_proj,
                     self.mdp.fusion_blocks,
                     self.mdp.fusion_norm,
                 ]
@@ -133,26 +135,28 @@ class MDP_MM_GoalAgent:
         batch_size = obs.shape[0]
 
         if 2 * (T + 1) > self.mdp.decoder_pos_embed.shape[1]:
-            pos_embed = utils.interpolate_pos_embed(
+            enc_pos_embed = utils.interpolate_pos_embed(self.mdp.pos_embed, 2 * (T + 1))
+            decoder_pos_embed = utils.interpolate_pos_embed(
                 self.mdp.decoder_pos_embed, 2 * (T + 1)
             )
-            decoder_pos_embed = pos_embed
             attn_mask = torch.ones(2 * (T + 1), 2 * (T + 1))[None, None, ...].to(
                 self.device
             )
         else:
-            pos_embed = self.mdp.decoder_pos_embed
-            decoder_pos_embed = self.mdp.decoder_pos_embed
+            enc_pos_embed = self.mdp.pos_embed              # [1, max_len, enc_n_embd]
+            decoder_pos_embed = self.mdp.decoder_pos_embed  # [1, max_len, n_embd]
             attn_mask = self.mdp.attn_mask
 
         # ENCODER PHASE
-        s_emb = self.mdp.state_embed(obs) + pos_embed[:, 0:1]  # [B, 1, D]
-        g_emb = self.mdp.state_embed(goal) + pos_embed[:, 2*T:2*T+1]  # [B, 1, D]
-        s_enc_input = torch.cat([s_emb, g_emb], dim=1)  # [B, 2, D]
+        s_emb = self.mdp.state_embed(obs) + enc_pos_embed[:, 0:1]       # [B, 1, enc_n_embd]
+        g_emb = self.mdp.state_embed(goal) + enc_pos_embed[:, 2*T:2*T+1]
+        s_enc_input = torch.cat([s_emb, g_emb], dim=1)                  # [B, 2, enc_n_embd]
 
-        a_emb = self.mdp.mask_token.repeat(batch_size, 2, 1)  # [B, 2, D]
-        a_emb[:, 0] = a_emb[:, 0] + pos_embed[:, 1]  # position for a0
-        a_emb[:, 1] = a_emb[:, 1] + pos_embed[:, 2*T+1]  # position for a_goal
+        # Placeholder de acciones en enc_n_embd (enc_mask_token si existe, mask_token si no)
+        _enc_mtok = getattr(self.mdp, 'enc_mask_token', self.mdp.mask_token)
+        a_emb = _enc_mtok.repeat(batch_size, 2, 1)                      # [B, 2, enc_n_embd]
+        a_emb[:, 0] = a_emb[:, 0] + enc_pos_embed[:, 1]
+        a_emb[:, 1] = a_emb[:, 1] + enc_pos_embed[:, 2*T+1]
 
         if self.is_early_fusion:
             # EARLY FUSION
@@ -180,6 +184,9 @@ class MDP_MM_GoalAgent:
 
         s_encoded = self.mdp.state_adapter(s_encoded)
         a_encoded = self.mdp.action_adapter(a_encoded)
+
+        s_encoded = self.mdp.state_proj(s_encoded)
+        a_encoded = self.mdp.action_proj(a_encoded)
 
         # Fusion: combine state and action information
         # Create ids_keep for fusion (interleaved: [0=s0, 1=a0, 2=s_goal, 3=a_goal])
@@ -305,26 +312,26 @@ class MDP_MM_GoalAgent:
         num_goals = goal.shape[1]
 
         if 2 * (T + 1) > self.mdp.decoder_pos_embed.shape[1]:
-            pos_embed = utils.interpolate_pos_embed(
+            enc_pos_embed = utils.interpolate_pos_embed(self.mdp.pos_embed, 2 * (T + 1))
+            decoder_pos_embed = utils.interpolate_pos_embed(
                 self.mdp.decoder_pos_embed, 2 * (T + 1)
             )
-            decoder_pos_embed = pos_embed
-            attn_mask = torch.ones(2 * (T + 1), 2 * (T + 1))[None, None, ...].to(
-                self.device
-            )
+            attn_mask = torch.ones(2 * (T + 1), 2 * (T + 1))[None, None, ...].to(self.device)
         else:
-            pos_embed = self.mdp.decoder_pos_embed
+            enc_pos_embed = self.mdp.pos_embed
             decoder_pos_embed = self.mdp.decoder_pos_embed
             attn_mask = self.mdp.attn_mask
 
+
         # ENCODER PHASE
-        s_emb = self.mdp.state_embed(obs) + pos_embed[:, 0:1]  # [B, 1, D]
-        g_emb = self.mdp.state_embed(goal) + pos_embed[:, time_budgets * 2]  # [B, num_goals, D]
+        s_emb = self.mdp.state_embed(obs) + enc_pos_embed[:, 0:1]  # [B, 1, D]
+        g_emb = self.mdp.state_embed(goal) + enc_pos_embed[:, time_budgets * 2]  # [B, num_goals, D]
         s_enc_input = torch.cat([s_emb, g_emb], dim=1)  # [B, num_goals+1, D]
 
-        a_emb = self.mdp.mask_token.repeat(batch_size, num_goals + 1, 1)  # [B, num_goals+1, D]
-        a_emb[:, 0] = a_emb[:, 0] + pos_embed[:, 1]  # position for a0
-        a_emb[:, 1] = a_emb[:, 1] + pos_embed[:, 2*T+1]  # position for a_goal
+        _enc_mtok = getattr(self.mdp, 'enc_mask_token', self.mdp.mask_token)
+        a_emb = _enc_mtok.repeat(batch_size, num_goals + 1, 1)  # [B, num_goals+1, D]
+        a_emb[:, 0] = a_emb[:, 0] + enc_pos_embed[:, 1]  # position for a0 
+        a_emb[:, 1] = a_emb[:, 1] + enc_pos_embed[:, 2*T+1]  # position for a_goal
 
         if self.is_early_fusion:
             # EARLY FUSION
@@ -352,6 +359,9 @@ class MDP_MM_GoalAgent:
 
         s_encoded = self.mdp.state_adapter(s_encoded)
         a_encoded = self.mdp.action_adapter(a_encoded)
+
+        s_encoded = self.mdp.state_proj(s_encoded)
+        a_encoded = self.mdp.action_proj(a_encoded)
 
         total_tokens = (num_goals + 1) * 2
         ids_keep = torch.arange(total_tokens, device=self.device).unsqueeze(0).expand(batch_size, -1)
