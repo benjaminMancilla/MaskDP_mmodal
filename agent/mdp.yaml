@@ -10,11 +10,23 @@ batch_size: 384 # Batch size Table 2
 mask_ratio: [0.15, 0.35, 0.55, 0.75, 0.95]
 transformer_cfg:
   # Hparams from paper (Table 2)
+  # Jitter
+  traj_lengths: [8, 16, 32, 64]
+  jitter_strategy: 'mix50'
   traj_length: 64           # context length
+
   n_embd: 256               # hidden dim
   n_head: 4                 # attention heads
   n_enc_layer: 3            # encoder layers
   n_dec_layer: 2            # decoder layers
+
+  # Modality Dropout  
+  modality_dropout: true
+  modality_dropout_prob: 0.60
+  action_dropout_prob: 1.0
+  state_dropout_prob: 0.0
+  min_keep_states: 1
+  min_keep_actions: 0
 
   # This stays the same
   embd_pdrop: 0

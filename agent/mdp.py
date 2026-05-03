@@ -20,6 +20,29 @@ class MaskedDP(nn.Module):
         # self.mask_ratio = config.mask_ratio
         self.pe = config.pe
         self.norm = config.norm
+
+        # -- Temporal Jitter --------------------------
+        raw_traj_lengths = getattr(config, "traj_lengths", None)
+        self.jitter_strategy = str(getattr(config, "jitter_strategy", "mix50"))
+        if raw_traj_lengths is not None:
+            self.traj_lengths = [int(t) for t in raw_traj_lengths]
+            assert all(t <= config.traj_length for t in self.traj_lengths)
+            print(f"Temporal Jitter ENABLED: strategy='{self.jitter_strategy}', T candidates={self.traj_lengths}")
+        else:
+            self.traj_lengths = None
+            print(f"Temporal Jitter DISABLED: fixed T={config.traj_length}")
+
+        # -- Modality Dropout --------------------------
+        self.modality_dropout      = bool(getattr(config, "modality_dropout", False))
+        self.modality_dropout_prob = float(getattr(config, "modality_dropout_prob", 0.25))
+        self.p_drop_action         = float(getattr(config, "action_dropout_prob", 1.0))
+        self.p_drop_state          = float(getattr(config, "state_dropout_prob", 0.0))
+        self.min_keep_states       = int(getattr(config, "min_keep_states", 1))
+        self.min_keep_actions      = int(getattr(config, "min_keep_actions", 0))
+        if self.modality_dropout:
+            print(f"Modality Dropout ENABLED (prob={self.modality_dropout_prob}, "
+                f"75A/25S ratio, min_states={self.min_keep_states}, min_actions={self.min_keep_actions})")
+
         print("norm", self.norm)
         self.state_embed = nn.Linear(obs_dim, self.n_embd)
         self.action_embed = nn.Linear(action_dim, self.n_embd)
@@ -104,7 +127,71 @@ class MaskedDP(nn.Module):
 
         return x_masked, mask, ids_restore
 
+    def _sample_jitter_length(self):
+        """Sample a trajectory length T for temporal jitter."""
+        if self.traj_lengths is None:
+            return None
+        T_max = self.traj_lengths[-1]
+        if self.jitter_strategy == 'mix50':
+            if np.random.rand() < 0.5:
+                return T_max
+            candidates = self.traj_lengths[:-1] if len(self.traj_lengths) > 1 else self.traj_lengths
+            return int(np.random.choice(candidates))
+        elif self.jitter_strategy == 'uniform':
+            return int(np.random.choice(self.traj_lengths))
+        elif self.jitter_strategy == 'uniform_log':
+            weights = np.array([1.0 / t for t in self.traj_lengths], dtype=float)
+            weights /= weights.sum()
+            return int(np.random.choice(self.traj_lengths, p=weights))
+        return T_max
+
+    def _apply_modality_dropout(self, states, actions):
+        """
+        Randomly drop one modality for the entire batch during training.
+        Returns (states, actions) with one modality zeroed out.
+        """
+        if not self.training or not self.modality_dropout:
+            return states, actions
+        if np.random.rand() >= self.modality_dropout_prob:
+            return states, actions
+
+        # Sample which modality to drop
+        total = self.p_drop_action + self.p_drop_state
+        drop_action = np.random.rand() < (self.p_drop_action / total)
+
+        B, T, _ = states.shape
+        if drop_action:
+            keep = max(self.min_keep_actions, 0)
+            if keep == 0:
+                actions = torch.zeros_like(actions)
+            else:
+                # keep first `keep` timesteps, zero the rest
+                mask = torch.zeros_like(actions)
+                mask[:, :keep] = 1.0
+                actions = actions * mask
+        else:
+            keep = max(self.min_keep_states, 1)
+            mask = torch.zeros_like(states)
+            mask[:, :keep] = 1.0
+            states = states * mask
+
+        return states, actions
+
     def forward_encoder(self, states, actions, mask_ratio):
+        batch_size, T_full, obs_dim = states.size()
+
+        # Temporal Jitter: recortar secuencia a T_jitter
+        T_jitter = self._sample_jitter_length()
+        if T_jitter is not None and T_jitter < T_full:
+            # Offset aleatorio para no siempre tomar desde el inicio
+            max_offset = T_full - T_jitter
+            offset = np.random.randint(0, max_offset + 1)
+            states  = states[:, offset:offset + T_jitter, :]
+            actions = actions[:, offset:offset + T_jitter, :]
+
+        # Modality Dropout
+        states, actions = self._apply_modality_dropout(states, actions)
+
         batch_size, T, obs_dim = states.size()
         s_emb = self.state_embed(states)
         a_emb = self.action_embed(actions)
@@ -114,7 +201,7 @@ class MaskedDP(nn.Module):
             .permute(0, 2, 1, 3)
             .reshape(batch_size, 2 * T, self.n_embd)
         )
-        x = x + self.pos_embed
+        x = x + self.pos_embed[:, :2 * T, :]
         x, mask, ids_restore = self.random_masking(x, mask_ratio)
         # apply Transformer blocks
         for blk in self.encoder_blocks:
