@@ -36,6 +36,16 @@ class MaskedDPMultimodal(nn.Module):
             print(f"R2 mode: enc_n_embd={self.enc_n_embd}, n_embd(fusion/dec)={self.n_embd}")
             assert self.n_embd % config.n_head == 0, "n_embd must be divisible by n_head"
             assert self.enc_n_embd % config.n_head == 0, "enc_n_embd must be divisible by n_head"
+
+        # Hidden dim for decoders
+        self.dec_n_embd = int(getattr(config, 'dec_n_embd', config.n_embd))
+        # Projection layer for decoder -> neck n_emb difference
+        self._has_dec_proj = (self.dec_n_embd != self.n_embd)
+        if self._has_dec_proj:
+            print(f"Dec reduction: dec_n_embd={self.dec_n_embd}, n_embd(fusion)={self.n_embd}")
+            assert self.dec_n_embd % config.n_head == 0, \
+                f"dec_n_embd ({self.dec_n_embd}) must be divisible by n_head ({config.n_head})"
+
         self.max_len = config.traj_length * 2
         # Temporal jitter configuration
         raw_traj_lengths = getattr(config, "traj_lengths", None)
@@ -159,23 +169,31 @@ class MaskedDPMultimodal(nn.Module):
         
         # --------------------------------------------------------------------------
         # MAE decoder specifics
-        self.decoder_state_embed = nn.Linear(self.n_embd, self.n_embd)
-        self.decoder_action_embed = nn.Linear(self.n_embd, self.n_embd)
+        self.decoder_state_embed  = nn.Linear(self.n_embd, self.dec_n_embd)
+        self.decoder_action_embed = nn.Linear(self.n_embd, self.dec_n_embd)
+
+        if self._has_dec_proj:
+            from omegaconf import OmegaConf
+            _dec_cfg_dict = OmegaConf.to_container(config, resolve=True)
+            _dec_cfg_dict['n_embd'] = self.dec_n_embd
+            dec_config = OmegaConf.create(_dec_cfg_dict)
+        else:
+            dec_config = config
 
         self.decoder_blocks = nn.ModuleList(
-            [Block(config) for _ in range(config.n_dec_layer)]
+            [Block(dec_config) for _ in range(config.n_dec_layer)]
         )
 
         self.action_head = nn.Sequential(
-            nn.LayerNorm(self.n_embd),
+            nn.LayerNorm(self.dec_n_embd),
             nn.ReLU(inplace=True),
-            nn.Linear(self.n_embd, action_dim),
+            nn.Linear(self.dec_n_embd, action_dim),
             nn.Tanh(),
         )  # decoder to patch
         self.state_head = nn.Sequential(
-            nn.LayerNorm(self.n_embd),
+            nn.LayerNorm(self.dec_n_embd),
             nn.ReLU(inplace=True),
-            nn.Linear(self.n_embd, obs_dim),
+            nn.Linear(self.dec_n_embd, obs_dim),
         )
         # --------------------------------------------------------------------------
         self.initialize_weights()
@@ -194,7 +212,7 @@ class MaskedDPMultimodal(nn.Module):
         self.register_buffer("pos_embed", enc_pe)
         
         # For decoder we use full pos_embed
-        dec_pe = utils.get_1d_sincos_pos_embed_from_grid(self.n_embd, self.max_len)
+        dec_pe = utils.get_1d_sincos_pos_embed_from_grid(self.dec_n_embd, self.max_len)
         dec_pe = torch.from_numpy(dec_pe).float().unsqueeze(0) / 2.0
         self.register_buffer("decoder_pos_embed", dec_pe)
         
@@ -610,7 +628,7 @@ class MaskedDPMultimodal(nn.Module):
         
         if self.train_mode == 'state_only':
             s = self.decoder_state_embed(x[:, ::2])
-            x_dec = torch.zeros(batch_size, total_len, self.n_embd, device=x.device)
+            x_dec = torch.zeros(batch_size, total_len, self.dec_n_embd, device=x.device)
             x_dec[:, ::2] = s
             x_dec = x_dec + self.decoder_pos_embed[:, :total_len, :]
 
@@ -623,7 +641,7 @@ class MaskedDPMultimodal(nn.Module):
         
         elif self.train_mode == 'action_only':
             a = self.decoder_action_embed(x[:, 1::2])
-            x_dec = torch.zeros(batch_size, total_len, self.n_embd, device=x.device)
+            x_dec = torch.zeros(batch_size, total_len, self.dec_n_embd, device=x.device)
             x_dec[:, 1::2] = a
             x_dec = x_dec + self.decoder_pos_embed[:, :total_len, :]
 
@@ -640,7 +658,7 @@ class MaskedDPMultimodal(nn.Module):
             a = self.decoder_action_embed(x[:, 1::2])
             
             # Interleave actions and states for the decoder
-            x = torch.stack([s, a], dim=2).reshape(batch_size, total_len, self.n_embd)
+            x = torch.stack([s, a], dim=2).reshape(batch_size, total_len, self.dec_n_embd)
             
             # Add positional embeddings
             x = x + self.decoder_pos_embed[:, :x.shape[1], :]

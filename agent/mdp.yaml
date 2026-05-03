@@ -19,8 +19,9 @@ transformer_cfg:
                               #   'mix50'       — 50% full T (last element), 50% uniform from list
                               #   'uniform'     — uniform sampling from list
                               #   'uniform_log' — weighted sampling with w_i = 1/T_i (favors short T)
-  n_embd: 256                 # hidden dim (fusion and decoder)
+  n_embd: 256                 # hidden dim (fusion)
   enc_n_embd: 256             # hidden dim (unimodal encoders)
+  dec_n_embd: 256             # hidden dim (decoders)
   n_head: 4                   # attention heads
   n_enc_layer: 2              # encoder layers
   n_dec_layer: 2              # decoder layers

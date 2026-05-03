@@ -242,7 +242,7 @@ class MDP_MM_GoalAgent:
         mask_actions = self.mdp.decoder_action_embed(mask_actions)
 
         x_dec = torch.stack([obs_dec, mask_actions], dim=2).reshape(
-            batch_size, 2 * (T + 1), self.config.n_embd
+            batch_size, 2 * (T + 1), self.mdp.dec_n_embd
         )
         x_dec += decoder_pos_embed[:, :2 * (T + 1)]
         
@@ -413,7 +413,7 @@ class MDP_MM_GoalAgent:
         mask_actions = self.mdp.decoder_action_embed(mask_actions)
         
         x_dec = torch.stack([obs_dec, mask_actions], dim=2).reshape(
-            batch_size, 2 * (T + 1), self.config.n_embd
+            batch_size, 2 * (T + 1), self.mdp.dec_n_embd
         )
         x_dec += decoder_pos_embed[:, :2 * (T + 1)]
         
