@@ -249,17 +249,28 @@ def main(cfg):
     wandb_config = omegaconf.OmegaConf.to_container(
         cfg, resolve=True, throw_on_missing=True
     )
-    wandb.init(
-        project=cfg.project,
-        name=exp_name,
-        config=wandb_config,
-        settings=wandb.Settings(
-            start_method="thread",
-            _disable_stats=True,
-        ),
-        mode="online" if cfg.use_wandb else "offline",
-        notes=cfg.notes,
-    )
+    wandb_run_id = cfg.get("wandb_run_id", None)
+    wandb_resume = cfg.get("wandb_resume", "allow")
+
+    if wandb_run_id is not None:
+        wandb.init(
+            project=cfg.project,
+            id=wandb_run_id,
+            resume=wandb_resume,
+            config=wandb_config,
+            settings=wandb.Settings(start_method="thread", _disable_stats=True),
+            mode="online" if cfg.use_wandb else "offline",
+            notes=cfg.notes,
+        )
+    else:
+        wandb.init(
+            project=cfg.project,
+            name=exp_name,
+            config=wandb_config,
+            settings=wandb.Settings(start_method="thread", _disable_stats=True),
+            mode="online" if cfg.use_wandb else "offline",
+            notes=cfg.notes,
+        )
     logger = Logger(work_dir, use_tb=cfg.use_tb, use_wandb=cfg.use_wandb)
 
     # create replay buffer
@@ -297,7 +308,7 @@ def main(cfg):
 
     timer = utils.Timer()
 
-    global_step = 0
+    global_step = cfg.snapshot_ts
     eval_every_step = utils.Every(cfg.eval_every_steps)
 
     if eval_every_step(global_step):

@@ -1,5 +1,5 @@
 defaults:
-  - agent: mdp_mm_goal
+  - agent: mdp_goal
   - override hydra/launcher: submitit_local
   - _self_
 
@@ -19,6 +19,9 @@ batch_size: ${agent.batch_size}
 goal_buffer_dir: /home/bmancilla/archive/maskdp_data/maskdp_eval/expert
 goal_buffer_size: 100000000
 goal_buffer_num_workers: 4
+
+wandb_run_id: null
+wandb_resume: "allow"
 
 # misc
 seed: 3
