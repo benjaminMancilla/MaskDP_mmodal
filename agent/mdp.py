@@ -188,6 +188,10 @@ class MaskedDP(nn.Module):
             offset = np.random.randint(0, max_offset + 1)
             states  = states[:, offset:offset + T_jitter, :]
             actions = actions[:, offset:offset + T_jitter, :]
+            T = T_jitter
+        else:
+            offset = 0
+            T = T_full  
 
         # Modality Dropout
         states, actions = self._apply_modality_dropout(states, actions)
@@ -207,7 +211,7 @@ class MaskedDP(nn.Module):
         for blk in self.encoder_blocks:
             x = blk(x, self.attn_mask)
         x = self.encoder_norm(x)
-        return x, mask, ids_restore
+        return x, mask, ids_restore, T, offset
 
     def forward_decoder(self, x, ids_restore):
         # append mask tokens to sequence
@@ -224,7 +228,7 @@ class MaskedDP(nn.Module):
         x = torch.stack([s, a], dim=1).permute(0, 2, 1, 3).reshape_as(x)
 
         # add pos embed
-        x = x + self.decoder_pos_embed
+        x = x + self.decoder_pos_embed[:, :x.shape[1], :]
 
         # apply Transformer blocks
         for blk in self.decoder_blocks:
@@ -296,14 +300,18 @@ class MaskedDPAgent:
     def update_mdp(self, states, actions):
         metrics = dict()
         mask_ratio = np.random.choice(self.mask_ratio)
-        latent, mask, ids_restore = self.model.forward_encoder(
+        latent, mask, ids_restore, T, offset = self.model.forward_encoder(
             states, actions, mask_ratio
         )
+
+        target_s = states[:, offset:offset + T, :]
+        target_a = actions[:, offset:offset + T, :]
+
         pred_s, pred_a = self.model.forward_decoder(
             latent, ids_restore
         )  # [N, L, p*p*3]
         mask_loss, state_loss, action_loss = self.model.forward_loss(
-            states, actions, pred_s, pred_a, mask
+            target_s, target_a, pred_s, pred_a, mask
         )
         if self.config.loss == "masked":
             loss = mask_loss
@@ -328,12 +336,14 @@ class MaskedDPAgent:
         batch = next(val_iter)
         obs, action, _, _, _, _ = utils.to_torch(batch, self.device)
         mask_ratio = np.random.choice(self.mask_ratio)
-        latent, mask, ids_restore = self.model.forward_encoder(obs, action, mask_ratio)
+        latent, mask, ids_restore, T, offset = self.model.forward_encoder(obs, action, mask_ratio)
+        target_s = obs[:, offset:offset + T, :]
+        target_a = action[:, offset:offset + T, :]
         pred_s, pred_a = self.model.forward_decoder(
             latent, ids_restore
         )  # [N, L, p*p*3]
         mask_loss, state_loss, action_loss = self.model.forward_loss(
-            obs, action, pred_s, pred_a, mask
+            target_s, target_a, pred_s, pred_a, mask
         )
 
         if self.use_tb:
