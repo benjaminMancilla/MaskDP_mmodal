@@ -29,6 +29,19 @@ def load_episode(fn, domain, obs):
     with fn.open("rb") as f:
         episode = np.load(f)
         episode = {k: episode[k] for k in episode.keys()}
+
+        # V-D4RL adapter
+        if "image" in episode and "observation" not in episode:
+            episode["observation"] = episode.pop("image")
+
+        for key in ("reward", "discount"):
+            if key in episode and episode[key].ndim == 1:
+                episode[key] = episode[key][:, np.newaxis].astype(np.float32)
+
+        if "physics" not in episode:
+            n = episode["observation"].shape[0]
+            episode["physics"] = np.zeros((n, 18), dtype=np.float64)
+
         return episode
 
 
@@ -60,6 +73,10 @@ class OfflineReplayBuffer(IterableDataset):
         cfg,
         relabel,
         obs,
+        file_split="all",
+        train_ratio=0.8,
+        eval_ratio=0.1,
+        bc_ratio=0.1,
     ):
         self._env = env
         self._replay_dir = replay_dir
@@ -76,6 +93,11 @@ class OfflineReplayBuffer(IterableDataset):
         self._cfg = cfg
         self._relabel = relabel
         self._obs = obs
+        assert abs(train_ratio + eval_ratio + bc_ratio - 1.0) < 1e-6
+        self._file_split = file_split
+        self._train_ratio = train_ratio
+        self._eval_ratio = eval_ratio
+        self._bc_ratio = bc_ratio
         # print('seed', np.random.get_state()[1][0])
         # random.seed(np.random.get_state()[1][0])
 
@@ -88,14 +110,29 @@ class OfflineReplayBuffer(IterableDataset):
             worker_id = torch.utils.data.get_worker_info().id
         except:
             worker_id = 0
-        eps_fns = sorted(
-            self._replay_dir.rglob("*.npz")
-        )  # get all episodes recursively
-        for eps_fn in eps_fns:
+
+        eps_fns = sorted(self._replay_dir.rglob("*.npz"))
+
+        if self._file_split != "all":
+            n_total = len(eps_fns)
+            n_train = int(n_total * self._train_ratio)
+            n_eval  = int(n_total * self._eval_ratio)
+            n_bc    = int(n_total * self._bc_ratio)
+
+            if self._file_split == "train":
+                eps_fns = eps_fns[:n_train]
+            elif self._file_split == "eval":
+                eps_fns = eps_fns[n_train:n_train + n_eval]
+            elif self._file_split == "bc":
+                eps_fns = eps_fns[n_train + n_eval:n_train + n_eval + n_bc]
+
+            print(f"[split={self._file_split}] {len(eps_fns)}/{n_total} files "
+                f"(train={n_train}, eval={n_eval}, bc={n_bc})")
+
+        for eps_idx, eps_fn in enumerate(eps_fns):
             if self._size > self._max_size:
                 print("over size", self._max_size)
                 break
-            eps_idx, eps_len = [int(x) for x in eps_fn.stem.split("_")[1:]]
             if eps_idx % self._num_workers != worker_id:
                 continue
             episode = load_episode(eps_fn, self._domain, self._obs)
@@ -207,6 +244,10 @@ def make_replay_loader(
     multi_task=False,
     relabel=True,
     obs="states",
+    file_split="all",
+    train_ratio=0.8,
+    eval_ratio=0.1,
+    bc_ratio=0.1,
 ):
     max_size_per_worker = max_size // max(1, num_workers)
 
@@ -222,6 +263,10 @@ def make_replay_loader(
         cfg,
         relabel,
         obs,
+        file_split=file_split,
+        train_ratio=train_ratio,
+        eval_ratio=eval_ratio,
+        bc_ratio=bc_ratio,
     )
 
     loader = torch.utils.data.DataLoader(
