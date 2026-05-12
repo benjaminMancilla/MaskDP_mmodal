@@ -9,6 +9,7 @@ import utils
 from dm_control.utils import rewards
 from einops import rearrange, reduce, repeat
 from agent.modules.attention import Block, CausalSelfAttention
+from agent.modules.pixel_encoder import PixelEncoder
 
 
 class MaskedDP(nn.Module):
@@ -44,7 +45,19 @@ class MaskedDP(nn.Module):
                 f"75A/25S ratio, min_states={self.min_keep_states}, min_actions={self.min_keep_actions})")
 
         print("norm", self.norm)
-        self.state_embed = nn.Linear(obs_dim, self.n_embd)
+        
+        self.use_pixel_obs = getattr(config, "use_pixel_obs", False)
+        if self.use_pixel_obs:
+            pixel_obs_shape = tuple(config.pixel_obs_shape)
+            self.pixel_encoder = PixelEncoder(pixel_obs_shape, self.n_embd)
+            self.state_embed = nn.Identity()
+            trainable = sum(p.numel() for p in self.pixel_encoder.parameters() if p.requires_grad)
+            total = sum(p.numel() for p in self.pixel_encoder.parameters())
+            print(f"[PixelEncoder] Trainable params: {trainable}/{total} (should be 0/{total})")
+        else:
+            self.pixel_encoder = None
+            self.state_embed = nn.Linear(obs_dim, self.n_embd)
+
         self.action_embed = nn.Linear(action_dim, self.n_embd)
         self.encoder_blocks = nn.ModuleList(
             [Block(config) for _ in range(config.n_enc_layer)]
@@ -67,13 +80,19 @@ class MaskedDP(nn.Module):
             nn.Linear(self.n_embd, action_dim),
             nn.Tanh(),
         )  # decoder to patch
+        self.state_pred_dim = self.n_embd if self.use_pixel_obs else obs_dim
         self.state_head = nn.Sequential(
             nn.LayerNorm(self.n_embd),
             nn.ReLU(inplace=True),
-            nn.Linear(self.n_embd, obs_dim),
+            nn.Linear(self.n_embd, self.state_pred_dim),
         )
         # --------------------------------------------------------------------------
         self.initialize_weights()
+
+    def _embed_states(self, states: torch.Tensor) -> torch.Tensor:
+        if self.pixel_encoder is not None:
+            return self.pixel_encoder(states)
+        return self.state_embed(states)
 
     def initialize_weights(self):
         pos_embed = utils.get_1d_sincos_pos_embed_from_grid(self.n_embd, self.max_len)
@@ -159,7 +178,7 @@ class MaskedDP(nn.Module):
         total = self.p_drop_action + self.p_drop_state
         drop_action = np.random.rand() < (self.p_drop_action / total)
 
-        B, T, _ = states.shape
+        B, T = states.shape[0], states.shape[1]
         if drop_action:
             keep = max(self.min_keep_actions, 0)
             if keep == 0:
@@ -178,7 +197,8 @@ class MaskedDP(nn.Module):
         return states, actions
 
     def forward_encoder(self, states, actions, mask_ratio):
-        batch_size, T_full, obs_dim = states.size()
+        batch_size, T_full = states.shape[0], states.shape[1]
+        obs_dim = states.shape[2] if states.ndim == 3 else None
 
         # Temporal Jitter: recortar secuencia a T_jitter
         T_jitter = self._sample_jitter_length()
@@ -196,8 +216,8 @@ class MaskedDP(nn.Module):
         # Modality Dropout
         states, actions = self._apply_modality_dropout(states, actions)
 
-        batch_size, T, obs_dim = states.size()
-        s_emb = self.state_embed(states)
+        batch_size, T = states.shape[0], states.shape[1]
+        s_emb = self._embed_states(states)
         a_emb = self.action_embed(actions)
 
         x = (
@@ -304,7 +324,8 @@ class MaskedDPAgent:
             states, actions, mask_ratio
         )
 
-        target_s = states[:, offset:offset + T, :]
+        with torch.no_grad():
+            target_s = self.model._embed_states(states[:, offset:offset + T])
         target_a = actions[:, offset:offset + T, :]
 
         pred_s, pred_a = self.model.forward_decoder(
@@ -337,7 +358,8 @@ class MaskedDPAgent:
         obs, action, _, _, _, _ = utils.to_torch(batch, self.device)
         mask_ratio = np.random.choice(self.mask_ratio)
         latent, mask, ids_restore, T, offset = self.model.forward_encoder(obs, action, mask_ratio)
-        target_s = obs[:, offset:offset + T, :]
+        with torch.no_grad():
+            target_s = self.model._embed_states(obs[:, offset:offset + T])
         target_a = action[:, offset:offset + T, :]
         pred_s, pred_a = self.model.forward_decoder(
             latent, ids_restore
