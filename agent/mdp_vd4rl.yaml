@@ -7,7 +7,7 @@ device: ${device}
 lr: 1e-4
 finetune_lr: 1e-5
 use_tb: ${use_tb}
-batch_size: 32 # Batch size Table 2
+batch_size: 128 # Batch size Table 2
 mask_ratio: [0.15, 0.35, 0.55, 0.75, 0.95]
 transformer_cfg:
   # Hparams from paper (Table 2)
@@ -19,12 +19,15 @@ transformer_cfg:
                               #   'mix50'       — 50% full T (last element), 50% uniform from list
                               #   'uniform'     — uniform sampling from list
                               #   'uniform_log' — weighted sampling with w_i = 1/T_i (favors short T)
-  n_embd: 256                 # hidden dim
+  n_embd: 256                 # hidden dim (fusion)
+  enc_n_embd: 128             # hidden dim (unimodal encoders)
+  dec_n_embd: 256             # hidden dim (decoders)            
   n_head: 4                   # attention heads
   n_enc_layer: 2              # encoder layers
   n_dec_layer: 2              # decoder layers
 
   n_fuse_layer: 1             # fusion encoder layers
+  fusion_mlp_ratio: 4.0       # MLP ratio for Co-attention
   use_fusion_type_embed: true # use fusion encoder bool (is optional)
   fusion_type: 'cross'        # 'self' | 'cross' | 'none' # fusion encoder type
 
