@@ -10,7 +10,7 @@ from collections import OrderedDict
 import utils
 from dm_control.utils import rewards
 from einops import rearrange, reduce, repeat
-from agent.modules.attention import Block, CausalSelfAttention, CoAttentionBlock, ParallelCoAttentionBlock, AdapterMLP
+from agent.modules.attention import Block, CausalSelfAttention, CoAttentionBlock, ParallelCoAttentionBlock, AdapterMLP, CoAttentionBlockSharedMLP
 
 
 class MaskedDPMultimodal(nn.Module):
@@ -157,6 +157,10 @@ class MaskedDPMultimodal(nn.Module):
             self.fusion_blocks = nn.ModuleList(
                 [CoAttentionBlock(config) for _ in range(self.n_fuse_layer)]
             )
+        elif self.fusion_type == 'cross_shared':
+            self.fusion_blocks = nn.ModuleList(
+                [CoAttentionBlockSharedMLP(config) for _ in range(self.n_fuse_layer)]
+            )
         else:
             self.fusion_blocks = nn.ModuleList(
                 [Block(config) for _ in range(self.n_fuse_layer)]
@@ -245,6 +249,15 @@ class MaskedDPMultimodal(nn.Module):
                 nn.init.zeros_(blk.cross_attn_a.proj.bias)
                 nn.init.zeros_(blk.mlp_a[2].weight)
                 nn.init.zeros_(blk.mlp_a[2].bias)
+            elif isinstance(blk, CoAttentionBlockSharedMLP):
+                # Cross-attention output projections (same as CoAttentionBlock)
+                nn.init.zeros_(blk.cross_attn_s.proj.weight)
+                nn.init.zeros_(blk.cross_attn_s.proj.bias)
+                nn.init.zeros_(blk.cross_attn_a.proj.weight)
+                nn.init.zeros_(blk.cross_attn_a.proj.bias)
+                # Shared MLP output projection (index 2 = second Linear)
+                nn.init.zeros_(blk.mlp[2].weight)
+                nn.init.zeros_(blk.mlp[2].bias)
             else:
                 # Zero-init Attention Output Projection
                 nn.init.zeros_(blk.attn.proj.weight)
@@ -398,7 +411,7 @@ class MaskedDPMultimodal(nn.Module):
         """
  
         # --- CROSS ATTENTION ---       
-        if self.fusion_type == 'cross':
+        if self.fusion_type in ('cross', 'cross_shared'):
             x_s = s_encoded
             x_a = a_encoded
 

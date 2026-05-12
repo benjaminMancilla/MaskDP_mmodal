@@ -192,7 +192,7 @@ class MDP_MM_GoalAgent:
         # Create ids_keep for fusion (interleaved: [0=s0, 1=a0, 2=s_goal, 3=a_goal])
         ids_keep = torch.arange(4, device=self.device).unsqueeze(0).expand(batch_size, -1)
         
-        if self.mdp.fusion_type == 'cross':
+        if self.mdp.fusion_type in ('cross', 'cross_shared'):
             # Cross-attention fusion
             x_s = s_encoded
             x_a = a_encoded
@@ -366,7 +366,7 @@ class MDP_MM_GoalAgent:
         total_tokens = (num_goals + 1) * 2
         ids_keep = torch.arange(total_tokens, device=self.device).unsqueeze(0).expand(batch_size, -1)
         
-        if self.mdp.fusion_type == 'cross':
+        if self.mdp.fusion_type in ('cross', 'cross_shared'):
             # Cross-attention fusion
             x_s = s_encoded
             x_a = a_encoded

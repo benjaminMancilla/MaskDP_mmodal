@@ -189,18 +189,22 @@ class CrossAttention(nn.Module):
 
 class CoAttentionBlock(nn.Module):
     """
-    Co-Attentional (ViLBERT style simplified).
+    Co-Attentional (ViLBERT style simplified) with configurable FFN ratio.
     """
     def __init__(self, config):
         super().__init__()
+
+        mlp_ratio = float(getattr(config, "fusion_mlp_ratio", 4.0))
+        hidden_dim = int(mlp_ratio * config.n_embd)
+
         # Stream 1 (ex. States)
         self.ln1_s = nn.LayerNorm(config.n_embd)
         self.cross_attn_s = CrossAttention(config) # Q=S, K/V=A
         self.ln2_s = nn.LayerNorm(config.n_embd)
         self.mlp_s = nn.Sequential(
-            nn.Linear(config.n_embd, 4 * config.n_embd),
+            nn.Linear(config.n_embd, hidden_dim),
             nn.GELU(),
-            nn.Linear(4 * config.n_embd, config.n_embd),
+            nn.Linear(hidden_dim, config.n_embd),
             nn.Dropout(config.resid_pdrop),
         )
 
@@ -209,9 +213,9 @@ class CoAttentionBlock(nn.Module):
         self.cross_attn_a = CrossAttention(config) # Q=A, K/V=S
         self.ln2_a = nn.LayerNorm(config.n_embd)
         self.mlp_a = nn.Sequential(
-            nn.Linear(config.n_embd, 4 * config.n_embd),
+            nn.Linear(config.n_embd, hidden_dim),
             nn.GELU(),
-            nn.Linear(4 * config.n_embd, config.n_embd),
+            nn.Linear(hidden_dim, config.n_embd),
             nn.Dropout(config.resid_pdrop),
         )
 
@@ -347,3 +351,45 @@ class TwinQ(nn.Module):
         x2 = self.block_2(self.drop(x), mask)
         q_2 = self.q2(self.ln_f(x2))
         return q_1, q_2
+
+class CoAttentionBlockSharedMLP(nn.Module):
+    """
+    Co-Attentional block with a single shared MLP across both streams.
+    Halves the MLP parameter cost vs CoAttentionBlock while keeping
+    full cross-attention capacity.
+    
+    Params: ~CoAttn(d, r) / 2 on the MLP side
+    At d=256, r=4: ~1,054K vs 1,579K (standard) -- matches CoAttn(224, r=2)
+    """
+    def __init__(self, config):
+        super().__init__()
+        mlp_ratio = float(getattr(config, "fusion_mlp_ratio", 4.0))
+        hidden_dim = int(mlp_ratio * config.n_embd)
+
+        # Cross-attention streams (identical to CoAttentionBlock)
+        self.ln1_s = nn.LayerNorm(config.n_embd)
+        self.cross_attn_s = CrossAttention(config)  # Q=S, K/V=A
+        self.ln1_a = nn.LayerNorm(config.n_embd)
+        self.cross_attn_a = CrossAttention(config)  # Q=A, K/V=S
+
+        # Single shared MLP + norm (applied to both streams)
+        self.ln2 = nn.LayerNorm(config.n_embd)
+        self.mlp = nn.Sequential(
+            nn.Linear(config.n_embd, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, config.n_embd),
+            nn.Dropout(config.resid_pdrop),
+        )
+
+    def forward(self, x_s, x_a, mask_s=None, mask_a=None):
+        # Cross-attention (parallel, same as CoAttentionBlock)
+        delta_s = self.cross_attn_s(self.ln1_s(x_s), self.ln1_a(x_a))
+        delta_a = self.cross_attn_a(self.ln1_a(x_a), self.ln1_s(x_s))
+        x_s = x_s + delta_s
+        x_a = x_a + delta_a
+
+        # Shared MLP applied independently to each stream
+        x_s = x_s + self.mlp(self.ln2(x_s))
+        x_a = x_a + self.mlp(self.ln2(x_a))
+
+        return x_s, x_a

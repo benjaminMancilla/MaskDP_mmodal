@@ -27,6 +27,7 @@ transformer_cfg:
   n_dec_layer: 2              # decoder layers
 
   n_fuse_layer: 1             # fusion encoder layers
+  fusion_mlp_ratio: 4.0       # MLP ratio for Co-attention
   use_fusion_type_embed: true # use fusion encoder bool (is optional)
   fusion_type: 'cross'        # 'self' | 'cross' | 'none' # fusion encoder type
 
