@@ -146,7 +146,9 @@ def main(cfg):
     device = torch.device(cfg.device)
 
     # create envs
-    env = dmc.make(cfg.task, seed=cfg.seed)
+    obs_type   = cfg.get("obs_type", "states")
+    pixel_size = cfg.get("pixel_size", 84)
+    env = dmc.make(cfg.task, seed=cfg.seed, obs_type=obs_type, pixel_size=pixel_size)
 
     # create agent
     agent = hydra.utils.instantiate(
@@ -192,7 +194,10 @@ def main(cfg):
         agent.model.load_state_dict(payload["model"])
 
     domain = get_domain(cfg.task)
-    snapshot_dir = work_dir / Path(cfg.snapshot_dir) / domain / str(cfg.seed)
+    if cfg.get("resume", False):
+        snapshot_dir = Path(cfg.snapshot_dir) / domain / str(cfg.seed)
+    else:
+        snapshot_dir = work_dir / Path(cfg.snapshot_dir) / domain / str(cfg.seed)
     snapshot_dir.mkdir(exist_ok=True, parents=True)
 
     # create logger
@@ -274,8 +279,16 @@ def main(cfg):
             print("--> Continuing training without previous history...")
 
     # Create TRAIN replay loader
-    replay_train_dir = Path(cfg.replay_buffer_dir) / domain
+    if cfg.get("use_raw_replay_dir", False):
+        replay_train_dir = Path(cfg.replay_buffer_dir)
+    else:
+        replay_train_dir = Path(cfg.replay_buffer_dir) / domain
+
     print(f"replay dir: {replay_train_dir}")
+    print(f"[DataLoader] train_file_split={cfg.get('train_file_split', 'all')} | "
+      f"train={cfg.get('train_ratio', 0.8)} eval={cfg.get('eval_ratio', 0.1)} "
+      f"bc={cfg.get('bc_ratio', 0.1)}")
+
     train_loader = make_replay_loader(
         env,
         replay_train_dir,
@@ -286,6 +299,10 @@ def main(cfg):
         domain,
         cfg.agent.transformer_cfg.traj_length,
         relabel=False,
+        file_split=cfg.get("train_file_split", "all"),
+        train_ratio=cfg.get("train_ratio", 0.8),
+        eval_ratio=cfg.get("eval_ratio", 0.1),
+        bc_ratio=cfg.get("bc_ratio", 0.1),
     )
     train_iter = iter(train_loader)
     
@@ -308,6 +325,9 @@ def main(cfg):
                 mode="goal",
                 cfg=cfg.agent.transformer_cfg,
                 relabel=False,
+                file_split=cfg.get("eval_file_split", "all"),
+                train_ratio=cfg.get("train_ratio", 0.8),
+                eval_ratio=cfg.get("eval_ratio", 0.1),
             )
             goal_iter = iter(goal_loader)
             video_recorder = VideoRecorder(work_dir if cfg.save_video else None)

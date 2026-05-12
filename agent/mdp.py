@@ -11,9 +11,16 @@ import utils
 from dm_control.utils import rewards
 from einops import rearrange, reduce, repeat
 from agent.modules.attention import Block, CausalSelfAttention, CoAttentionBlock, ParallelCoAttentionBlock, AdapterMLP, CoAttentionBlockSharedMLP
+from agent.modules.pixel_encoder import PixelEncoder
 
 
 class MaskedDPMultimodal(nn.Module):
+
+    def _embed_states(self, states: torch.Tensor) -> torch.Tensor:
+        if self.pixel_encoder is not None:
+            return self.pixel_encoder(states)
+        return self.state_embed(states)
+
     def __init__(self, obs_dim, action_dim, config, train_mode='joint'):
         super().__init__()
         # Pretrain configuration
@@ -67,7 +74,19 @@ class MaskedDPMultimodal(nn.Module):
         self.pe = config.pe
         self.norm = config.norm
         print("norm", self.norm)
-        self.state_embed = nn.Linear(obs_dim, self.enc_n_embd)
+
+        self.use_pixel_obs = getattr(config, "use_pixel_obs", False)
+        if self.use_pixel_obs:
+            pixel_obs_shape = tuple(config.pixel_obs_shape)
+            self.pixel_encoder = PixelEncoder(pixel_obs_shape, self.enc_n_embd)
+            self.state_embed = nn.Identity()
+            trainable = sum(p.numel() for p in self.pixel_encoder.parameters() if p.requires_grad)
+            total = sum(p.numel() for p in self.pixel_encoder.parameters())
+            print(f"[PixelEncoder] Trainable params: {trainable}/{total} (should be 0/{total})")
+        else:
+            self.pixel_encoder = None
+            self.state_embed = nn.Linear(obs_dim, self.enc_n_embd)
+
         self.action_embed = nn.Linear(action_dim, self.enc_n_embd)
         
         # Modality droupout
@@ -194,10 +213,11 @@ class MaskedDPMultimodal(nn.Module):
             nn.Linear(self.dec_n_embd, action_dim),
             nn.Tanh(),
         )  # decoder to patch
+        self.state_pred_dim = self.enc_n_embd if self.use_pixel_obs else obs_dim
         self.state_head = nn.Sequential(
             nn.LayerNorm(self.dec_n_embd),
             nn.ReLU(inplace=True),
-            nn.Linear(self.dec_n_embd, obs_dim),
+            nn.Linear(self.dec_n_embd, self.state_pred_dim),
         )
         # --------------------------------------------------------------------------
         self.initialize_weights()
@@ -486,10 +506,10 @@ class MaskedDPMultimodal(nn.Module):
         elif self.train_mode == 'action_only':
             states = torch.full_like(states, self.pad_value)
 
-        batch_size, T, obs_dim = states.size()
+        batch_size, T = states.shape[0], states.shape[1]
         
         # Embeddings
-        s_emb = self.state_embed(states)
+        s_emb = self._embed_states(states)
         a_emb = self.action_embed(actions)
         
         # Base:
@@ -663,7 +683,7 @@ class MaskedDPMultimodal(nn.Module):
 
             # dummy for states
             a_pred = self.action_head(x_dec[:, 1::2])
-            s_pred = torch.zeros(batch_size, total_len // 2, self.obs_dim, device=x.device)
+            s_pred = torch.zeros(batch_size, total_len // 2, self.state_pred_dim, device=x.device)
         
         else:  # 'joint'
             # Project to decoder embedding space
@@ -688,6 +708,11 @@ class MaskedDPMultimodal(nn.Module):
 
     def forward_loss(self, target_s, target_a, pred_s, pred_a, mask):
         batch_size, T, _ = target_s.size()
+
+        with torch.no_grad():
+            target_norm = torch.norm(target_s, dim=-1).mean().item()
+            pred_norm = torch.norm(pred_s, dim=-1).mean().item()
+            print(f"[NORM CHECK] target_s: {target_norm:.4f} | pred_s: {pred_norm:.4f}")
         
         # State normalization
         if self.norm == "l2":
@@ -970,8 +995,8 @@ class MaskedDPMultimodalAgent:
         # so no other changes are needed.
         if self.model.traj_lengths is not None and self.training:
             T_eff = self.model._sample_jitter_T()
-            states  = states[:, :T_eff, :]
-            actions = actions[:, :T_eff, :]
+            states  = states[:, :T_eff]
+            actions = actions[:, :T_eff]
 
         # Encoder (dual + optional fusion)
         x_fused, mask, ids_restore, ids_keep = \
@@ -983,8 +1008,21 @@ class MaskedDPMultimodalAgent:
         )
         
         # Loss
+        with torch.no_grad():
+            target_s = self.model._embed_states(states)  # (B, T, enc_embd)
+
+        # DEBUG — remover después de verificar
+        if step % 5000 == 0:
+            norms = torch.norm(target_s, dim=-1)  # debería ser ~1.0 por L2 norm
+            sim = torch.nn.functional.cosine_similarity(
+                target_s[:, 0].unsqueeze(1),   # primer frame
+                target_s[:, 1:],               # resto de frames
+                dim=-1
+            ).mean()
+            print(f"[DEBUG step={step}] embedding norm: {norms.mean():.4f} ± {norms.std():.4f} | inter-frame cosine sim: {sim:.4f}")
+        
         mask_loss, state_loss, action_loss = self.model.forward_loss(
-            states, actions, pred_s, pred_a, mask
+            target_s, actions, pred_s, pred_a, mask
         )
         
         if self.config.loss == "masked":

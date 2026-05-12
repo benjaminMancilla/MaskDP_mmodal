@@ -1,0 +1,76 @@
+# @package agent
+_target_: agent.mdp.MaskedDPMultimodalAgent
+name: mdp_multimodal
+obs_shape: ??? # to be specified later
+action_shape: ??? # to be specified later
+device: ${device}
+lr: 1e-4
+finetune_lr: 1e-5
+use_tb: ${use_tb}
+batch_size: 32 # Batch size Table 2
+mask_ratio: [0.15, 0.35, 0.55, 0.75, 0.95]
+transformer_cfg:
+  # Hparams from paper (Table 2)
+  traj_length: 64            # max context length — sets model max_len and dataloader window size
+  traj_lengths: null     # temporal jitter: null = disabled (original behavior)
+                                    # or a list of discrete lengths to sample from, e.g. [8, 16, 32, 64, 128]
+                                    # the last element must equal traj_length (used as full-T reference)
+  jitter_strategy: 'mix50'   # sampling strategy — only used when traj_lengths is not null:
+                              #   'mix50'       — 50% full T (last element), 50% uniform from list
+                              #   'uniform'     — uniform sampling from list
+                              #   'uniform_log' — weighted sampling with w_i = 1/T_i (favors short T)
+  n_embd: 256                 # hidden dim
+  n_head: 4                   # attention heads
+  n_enc_layer: 2              # encoder layers
+  n_dec_layer: 2              # decoder layers
+
+  n_fuse_layer: 1             # fusion encoder layers
+  use_fusion_type_embed: true # use fusion encoder bool (is optional)
+  fusion_type: 'cross'        # 'self' | 'cross' | 'none' # fusion encoder type
+
+  modality_dropout: false      # use modality dropout bool
+  modality_dropout_prob: 0.25 # modality dropout prob
+  state_dropout_prob:  0.0    # state dropout prob (if modality dropout is used)
+  action_dropout_prob: 1.0    # action dropout prob (if modality dropout is used)
+  min_keep_states:  1         # minimun of states when dropout
+  min_keep_actions: 0         # minimun of actions when dropout
+
+  # Early fusion encoder
+  mlp_ratio: 4
+  use_early_fusion: false
+
+  # MLP adapter (finetuning)
+  use_adapter_mlp: false
+  adapter_mlp_ratio: 2          # hidden_dim = n_embd * ratio
+  adapter_mlp_layers: 2
+  adapter_mlp_norm: true
+  adapter_mlp_residual: true
+
+  # This stays the same
+  embd_pdrop: 0
+  resid_pdrop: 0
+  attn_pdrop: 0
+  pe: 'fixed'
+  loss: 'total'
+  norm: 'l2'
+
+  # Visual
+  use_pixel_obs: true
+  pixel_obs_shape: [64, 64, 3]
+
+train_mode: 'joint'           # 'joint' | 'state_only' | 'action_only'
+
+#freeze_schedule: {}
+
+freeze_schedule:
+  # state_embed:           [0, 40000000]
+  # state_encoder_blocks:  [0, 40000000]
+  # state_encoder_norm:    [0, 40000000]
+
+  # action_embed:          [0, 40000000]
+  # action_encoder_blocks: [0, 40000000]
+  # action_encoder_norm:   [0, 40000000]
+
+  # early_fusion_blocks:   [0, 40000000]
+  # fusion_blocks:         [0, 40000000]
+  # decoder_blocks:        [0, 40000000]

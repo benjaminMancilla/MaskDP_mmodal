@@ -1,0 +1,61 @@
+defaults:
+  - agent: mdp_vd4rl
+  - override hydra/launcher: submitit_local
+  - _self_
+
+# task settings
+task: cheetah_run
+discount: 0.99
+
+# Split configuration
+train_file_split: "train"
+eval_file_split: "eval"
+train_ratio: 0.8
+eval_ratio: 0.1
+bc_ratio: 0.1
+
+# train settings
+num_grad_steps: 400010
+log_every_steps: 1000
+
+# eval
+eval_every_steps: 25000
+num_eval_episodes: 10
+
+# snapshot
+snapshots: [0, 25000, 50000, 75000, 100000, 
+  125000, 150000, 175000, 200000, 225000, 250000, 275000, 300000, 
+  325000, 350000, 375000, 400000]
+snapshot_dir: /home/bmancilla/archive/MaskDP/maskdp_snapshots_vd4rl/
+
+# resume
+resume: false
+resume_dir: none
+resume_step: 0
+
+use_raw_replay_dir: true
+replay_buffer_dir: /home/bmancilla/archive/MaskDP/v_d4rl_data/main/cheetah_run/expert/64px
+replay_buffer_size: 500000         # V-D4RL has less episodes
+replay_buffer_num_workers: 8
+batch_size: ${agent.batch_size}
+
+# dataset GOAL EVALUATION
+# IMPORTANT: with out physics, start states will be random
+goal_buffer_dir: null
+goal_buffer_size: 50000
+goal_buffer_num_workers: 4
+num_goal_eval_episodes: 20
+
+# Pixel Observation
+obs_type: pixels
+pixel_size: 64
+
+# Miscelaneous
+seed: 1
+device: cuda
+save_video: false
+use_tb: true
+use_wandb: true
+project: maskdp-mm-vd4rl
+notes: "pretrain vd4rl pixels cheetah"
+exp_name: vd4rl_pixel_placeholder_cnn

@@ -8,7 +8,7 @@ task: cheetah_run
 discount: 0.99
 
 # train settings
-num_grad_steps: 400010
+num_grad_steps: 500010
 log_every_steps: 1000
 
 # eval
@@ -25,6 +25,7 @@ resume_dir: none
 resume_step: 0
 
 # dataset TRAIN
+use_raw_replay_dir: false
 replay_buffer_dir: /home/bmancilla/archive/maskdp_data/maskdp_train
 replay_buffer_size: 2000000
 replay_buffer_num_workers: 16
