@@ -1,0 +1,39 @@
+# @package agent
+_target_: agent.mdp.MaskedDPAgent
+name: mdp
+obs_shape: ???
+action_shape: ???
+device: ${device}
+lr: 1e-4
+use_tb: ${use_tb}
+batch_size: 128
+mask_ratio: [0.15, 0.35, 0.55, 0.75, 0.95]
+transformer_cfg:
+  traj_length: 64
+  traj_lengths: null          # sin jitter para V-D4RL (igual que hier)
+  jitter_strategy: 'mix50'
+
+  n_embd: 256
+  n_head: 4
+  n_enc_layer: 3              # mismo que paper
+  n_dec_layer: 2
+
+  # Modality Dropout — desactivado para staging inicial
+  modality_dropout: false
+  modality_dropout_prob: 0.60
+  action_dropout_prob: 1.0
+  state_dropout_prob: 0.0
+  min_keep_states: 1
+  min_keep_actions: 0
+
+  # Visual
+  use_pixel_obs: true
+  pixel_obs_shape: [64, 64, 3]
+
+  # This stays the same
+  embd_pdrop: 0
+  resid_pdrop: 0
+  attn_pdrop: 0
+  pe: 'fixed'
+  loss: 'total'
+  norm: 'l2'
