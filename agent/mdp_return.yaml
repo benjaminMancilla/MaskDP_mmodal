@@ -1,0 +1,15 @@
+# @package agent
+_target_: agent.mdp_return.MaskingEvalAgent
+name: mdp_return
+obs_shape: ???
+action_shape: ???
+device: ${device}
+use_tb: ${use_tb}
+
+# Masking eval params
+T_cond: 16       # warmup steps + fixed context size during eval
+T_pred: 48       # actions predicted per cycle (T_cond + T_pred must equal traj_length)
+replan_freq: 48  # divisor of T_pred: T_pred=open-loop, 1=fully closed-loop
+
+path: null
+transformer_cfg: null

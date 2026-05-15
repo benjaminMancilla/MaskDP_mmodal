@@ -1,0 +1,28 @@
+defaults:
+  - agent: mdp_return
+  - _self_
+
+# task
+task: cheetah_run
+discount: 0.99
+obs_type: pixels
+pixel_size: 64
+
+action_repeat: 2
+
+# eval
+num_eval_episodes: 10
+
+# multiple snapshots to eval in one run (optional, overrides pretrain_path)
+# eval_snapshots:
+#   - /path/to/snapshot_100000.pt
+#   - /path/to/snapshot_200000.pt
+
+# misc
+seed: 1
+device: cuda
+use_tb: true
+use_wandb: true
+project: maskdp-paper-vd4rl-eval
+notes: "masking BC eval paper vd4rl"
+exp_name: paper_masking_eval_Tcond16_Tpred48

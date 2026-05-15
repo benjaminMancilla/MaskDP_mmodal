@@ -45,6 +45,12 @@ goal_buffer_size: 50000
 goal_buffer_num_workers: 4
 num_goal_eval_episodes: 20
 
+# return eval
+eval_T_cond: 16
+eval_T_pred: 48
+eval_replan_freq: 48
+num_eval_episodes: 10
+
 # Pixel Observation
 obs_type: pixels
 pixel_size: 64

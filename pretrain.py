@@ -22,6 +22,9 @@ from video import VideoRecorder
 import wandb
 import omegaconf
 import agent.mdp_goal as mdp_goal_module
+import agent.mdp_return as mdp_return_module
+
+from eval_return import eval_masking
 
 torch.backends.cudnn.benchmark = True
 
@@ -197,6 +200,19 @@ def main(cfg):
     )
     train_iter = iter(train_loader)
 
+
+    eval_agent = None
+    if cfg.get("obs_type", "states") == "pixels":
+        eval_agent = mdp_return_module.MaskingEvalAgent(
+            obs_shape=(pixel_size, pixel_size, 3),
+            action_shape=env.action_spec().shape,
+            device=device,
+            T_cond=cfg.get("eval_T_cond", 16),
+            T_pred=cfg.get("eval_T_pred", 48),
+            replan_freq=cfg.get("eval_replan_freq", 48),
+            transformer_cfg=agent.model.config,
+        )
+
     # Goal evaluation loader
     goal_iter = None
     video_recorder = VideoRecorder(work_dir if cfg.save_video else None)
@@ -266,6 +282,25 @@ def main(cfg):
             del goal_agent
             torch.cuda.empty_cache()
             agent.train(training=True)
+
+        if eval_agent is not None and eval_every_step(global_step):
+            print(f"[{global_step}] Running masking eval...")
+            eval_agent.mdp.load_state_dict(agent.model.state_dict())
+            eval_agent.mdp.eval()
+
+            eval_metrics = eval_masking(
+                global_step,
+                eval_agent,
+                env,
+                cfg.num_eval_episodes,
+                cfg.discount,
+                cfg.get("eval_T_cond", 16),
+            )
+            for key, value in eval_metrics.items():
+                logger.log_metrics({key: value}, global_step, ty="eval")
+            logger.dump(global_step, ty="eval")
+
+            agent.model.train()
 
         if global_step in cfg.snapshots:
             snapshot = snapshot_dir / f"snapshot_{global_step}.pt"
