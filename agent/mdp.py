@@ -15,6 +15,7 @@ from agent.modules.pixel_encoder import PixelEncoder
 class MaskedDP(nn.Module):
     def __init__(self, obs_dim, action_dim, config):
         super().__init__()
+        self.config = config 
         # MAE encoder specifics
         self.n_embd = config.n_embd
         self.max_len = config.traj_length * 2
@@ -117,7 +118,7 @@ class MaskedDP(nn.Module):
             nn.init.constant_(m.bias, 0)
             nn.init.constant_(m.weight, 1.0)
 
-    def random_masking(self, x, mask_ratio):
+    def random_masking(self, x, mask_ratio, noise):
         """
         Perform per-sample random masking by per-sample shuffling.
         Per-sample shuffling is done by argsort random noise.
@@ -125,8 +126,8 @@ class MaskedDP(nn.Module):
         """
         N, L, D = x.shape  # batch, length, dim
         len_keep = int(L * (1 - mask_ratio))
-
-        noise = torch.rand(N, L, device=x.device)  # noise in [0, 1]
+        if noise is None:
+            noise = torch.rand(N, L, device=x.device)  # noise in [0, 1]
 
         # sort noise for each sample
         ids_shuffle = torch.argsort(
@@ -164,37 +165,6 @@ class MaskedDP(nn.Module):
             return int(np.random.choice(self.traj_lengths, p=weights))
         return T_max
 
-    def _apply_modality_dropout(self, states, actions):
-        """
-        Randomly drop one modality for the entire batch during training.
-        Returns (states, actions) with one modality zeroed out.
-        """
-        if not self.training or not self.modality_dropout:
-            return states, actions
-        if np.random.rand() >= self.modality_dropout_prob:
-            return states, actions
-
-        # Sample which modality to drop
-        total = self.p_drop_action + self.p_drop_state
-        drop_action = np.random.rand() < (self.p_drop_action / total)
-
-        B, T = states.shape[0], states.shape[1]
-        if drop_action:
-            keep = max(self.min_keep_actions, 0)
-            if keep == 0:
-                actions = torch.zeros_like(actions)
-            else:
-                # keep first `keep` timesteps, zero the rest
-                mask = torch.zeros_like(actions)
-                mask[:, :keep] = 1.0
-                actions = actions * mask
-        else:
-            keep = max(self.min_keep_states, 1)
-            mask = torch.zeros_like(states)
-            mask[:, :keep] = 1.0
-            states = states * mask
-
-        return states, actions
 
     def forward_encoder(self, states, actions, mask_ratio):
         batch_size, T_full = states.shape[0], states.shape[1]
@@ -213,8 +183,6 @@ class MaskedDP(nn.Module):
             offset = 0
             T = T_full  
 
-        # Modality Dropout
-        states, actions = self._apply_modality_dropout(states, actions)
 
         batch_size, T = states.shape[0], states.shape[1]
         s_emb = self._embed_states(states)
@@ -226,7 +194,30 @@ class MaskedDP(nn.Module):
             .reshape(batch_size, 2 * T, self.n_embd)
         )
         x = x + self.pos_embed[:, :2 * T, :]
-        x, mask, ids_restore = self.random_masking(x, mask_ratio)
+
+        # Modality Dropout
+        noise = torch.rand(batch_size, 2 * T, device=states.device)
+
+        if self.training and self.modality_dropout and (np.random.rand() < self.modality_dropout_prob):
+            total_prob = self.p_drop_action + self.p_drop_state
+            p_action = self.p_drop_action / total_prob if total_prob > 0 else 0.5
+            drop_actions = np.random.rand() < p_action
+            start_idx = 1 if drop_actions else 0
+            noise[:, start_idx::2] += 100.0
+
+        # Modality shields (min keep tokens)
+        if self.min_keep_states > 0:
+            k_s = min(self.min_keep_states, T)
+            _, top_s_idx = torch.topk(torch.rand(batch_size, T, device=states.device), k_s, dim=1)
+            noise.scatter_(1, top_s_idx * 2, -100.0)
+
+        if self.min_keep_actions > 0:
+            k_a = min(self.min_keep_actions, T)
+            _, top_a_idx = torch.topk(torch.rand(batch_size, T, device=states.device), k_a, dim=1)
+            noise.scatter_(1, top_a_idx * 2 + 1, -100.0)
+
+
+        x, mask, ids_restore = self.random_masking(x, mask_ratio, noise=noise)
         # apply Transformer blocks
         for blk in self.encoder_blocks:
             x = blk(x, self.attn_mask)
@@ -325,7 +316,10 @@ class MaskedDPAgent:
         )
 
         with torch.no_grad():
-            target_s = self.model._embed_states(states[:, offset:offset + T])
+            if self.model.use_pixel_obs:
+                target_s = self.model._embed_states(states[:, offset:offset + T])
+            else:
+                target_s = states[:, offset:offset + T]
         target_a = actions[:, offset:offset + T, :]
 
         pred_s, pred_a = self.model.forward_decoder(
@@ -359,7 +353,10 @@ class MaskedDPAgent:
         mask_ratio = np.random.choice(self.mask_ratio)
         latent, mask, ids_restore, T, offset = self.model.forward_encoder(obs, action, mask_ratio)
         with torch.no_grad():
-            target_s = self.model._embed_states(obs[:, offset:offset + T])
+            if self.model.use_pixel_obs:
+                target_s = self.model._embed_states(obs[:, offset:offset + T])
+            else:
+                target_s = obs[:, offset:offset + T]
         target_a = action[:, offset:offset + T, :]
         pred_s, pred_a = self.model.forward_decoder(
             latent, ids_restore
