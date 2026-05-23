@@ -1,0 +1,22 @@
+defaults:
+  - agent: mdp_return
+  - _self_
+
+# task
+task: cheetah_run
+discount: 0.99
+obs_type: pixels
+pixel_size: 64
+action_repeat: 2
+
+# eval
+num_eval_episodes: 10
+
+# misc
+seed: 1
+device: cuda
+use_tb: true
+use_wandb: true
+project: maskdp-mm-vd4rl-eval
+notes: "masking eval hierarchical vd4rl"
+exp_name: hier_masking_eval_Tcond32_Tpred32

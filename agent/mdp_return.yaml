@@ -1,0 +1,15 @@
+# @package agent
+_target_: agent.mdp_return.MaskingEvalAgentMultimodal
+name: mdp_return
+obs_shape: ???
+action_shape: ???
+device: ${device}
+use_tb: ${use_tb}
+
+# Masking eval params
+T_cond: 32
+T_pred: 32
+replan_freq: 32   # T_pred = open-loop, 1 = fully closed-loop
+
+path: null
+transformer_cfg: null
