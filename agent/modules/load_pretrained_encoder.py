@@ -49,8 +49,10 @@ def load_drqbc_convnet(encoder, ckpt_path: str, freeze: bool = True):
     if freeze:
         for p in encoder.convnet.parameters():
             p.requires_grad = False
-        print(f"  [load_drqbc_convnet] Convnet frozen. "
-              f"Projection head remains trainable.")
+        # Freeze projection head too
+        for p in encoder.projection.parameters():
+            p.requires_grad = False
+        print(f"  [load_drqbc_convnet] Convnet and projection frozen.")
     else:
         print(f"  [load_drqbc_convnet] Convnet loaded, NOT frozen (fine-tune mode).")
 
