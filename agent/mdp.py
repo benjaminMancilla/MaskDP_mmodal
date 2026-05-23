@@ -720,7 +720,6 @@ class MaskedDPMultimodal(nn.Module):
         with torch.no_grad():
             target_norm = torch.norm(target_s, dim=-1).mean().item()
             pred_norm = torch.norm(pred_s, dim=-1).mean().item()
-            print(f"[NORM CHECK] target_s: {target_norm:.4f} | pred_s: {pred_norm:.4f}")
         
         # State normalization
         if self.norm == "l2":
