@@ -57,6 +57,13 @@ transformer_cfg:
   loss: 'total'
   norm: 'l2'
 
+  # Visual
+  use_pixel_obs: false
+  pixel_obs_shape: [64, 64, 3]
+  pixel_encoder_type: drqv2
+  freeze_encoder_after: 999999
+  pretrained_encoder_path: null
+
 train_mode: 'joint'           # 'joint' | 'state_only' | 'action_only'
 
 #freeze_schedule: {}

@@ -12,6 +12,7 @@ from dm_control.utils import rewards
 from einops import rearrange, reduce, repeat
 from agent.modules.attention import Block, CausalSelfAttention, CoAttentionBlock, ParallelCoAttentionBlock, AdapterMLP, CoAttentionBlockSharedMLP
 from agent.modules.pixel_encoder import PixelEncoder
+from agent.modules.load_pretrained_encoder import load_drqbc_convnet
 
 
 class MaskedDPMultimodal(nn.Module):
@@ -78,11 +79,18 @@ class MaskedDPMultimodal(nn.Module):
         self.use_pixel_obs = getattr(config, "use_pixel_obs", False)
         if self.use_pixel_obs:
             pixel_obs_shape = tuple(config.pixel_obs_shape)
-            self.pixel_encoder = PixelEncoder(pixel_obs_shape, self.enc_n_embd)
+            pixel_encoder_type = str(getattr(config, "pixel_encoder_type", "drqv2"))
+
+            self.pixel_encoder = PixelEncoder(pixel_obs_shape, self.enc_n_embd, encoder_type=pixel_encoder_type)
+
+            pretrained_path = getattr(config, "pretrained_encoder_path", None)
+            if pretrained_path is not None:
+                load_drqbc_convnet(self.pixel_encoder, pretrained_path, freeze=True)
+
             self.state_embed = nn.Identity()
             trainable = sum(p.numel() for p in self.pixel_encoder.parameters() if p.requires_grad)
             total = sum(p.numel() for p in self.pixel_encoder.parameters())
-            print(f"[PixelEncoder] Trainable params: {trainable}/{total} (should be 0/{total})")
+            print(f"[PixelEncoder] Trainable params: {trainable}/{total}")
         else:
             self.pixel_encoder = None
             self.state_embed = nn.Linear(obs_dim, self.enc_n_embd)
@@ -808,7 +816,7 @@ class MaskedDPMultimodalAgent:
         # When a freeze_schedule IS active, _rebuild_optimizer / _add_encoder_param_groups
         # will replace this at step 0 before any gradient is taken.
         self.opt = torch.optim.Adam(
-            [{'params': list(self.model.parameters()), 'lr': lr, 'target_lr': lr, 'name': 'all_params'}]
+            [{'params': [p for p in self.model.parameters() if p.requires_grad], 'lr': lr, 'target_lr': lr, 'name': 'all_params'}]
         )
         print(
             "number of parameters: %e", sum(p.numel() for p in self.model.parameters())
