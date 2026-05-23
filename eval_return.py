@@ -45,8 +45,8 @@ def eval_masking(
         episode_return_full       = 0.0
         episode_return_postwarmup = 0.0
         episode_length            = 0
-        discount_full             = 1.0
-        discount_post             = 1.0
+        # discount_full             = 1.0
+        # discount_post             = 1.0
 
         while not time_step.last():
             obs = time_step.observation  # (C, H, W) pixels or (obs_dim,) states
@@ -56,14 +56,14 @@ def eval_masking(
 
             time_step = env.step(action)
 
-            episode_return_full += time_step.reward * discount_full
-            discount_full       *= discount
+            episode_return_full += time_step.reward # * discount_full
+            # discount_full       *= discount
             episode_length      += 1
 
             # Post-warmup return
             if episode_length > T_cond:
-                episode_return_postwarmup += time_step.reward * discount_post
-                discount_post             *= discount
+                episode_return_postwarmup += time_step.reward # * discount_post
+                # discount_post             *= discount
 
         total_returns_full.append(episode_return_full)
         total_returns_postwarmup.append(episode_return_postwarmup)
