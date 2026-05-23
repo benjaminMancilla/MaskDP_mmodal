@@ -17,6 +17,7 @@ bc_ratio: 0.1
 # train settings
 num_grad_steps: 400010
 log_every_steps: 1000
+action_repeat: 2
 
 # eval
 eval_every_steps: 25000
