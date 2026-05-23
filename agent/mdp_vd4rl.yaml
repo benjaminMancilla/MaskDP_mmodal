@@ -13,10 +13,10 @@ transformer_cfg:
   traj_lengths: null          # sin jitter para V-D4RL (igual que hier)
   jitter_strategy: 'mix50'
 
-  n_embd: 256
-  n_head: 4
-  n_enc_layer: 3              # mismo que paper
-  n_dec_layer: 2
+  n_embd: 256   #256
+  n_head: 4     #4
+  n_enc_layer: 3   #3 
+  n_dec_layer: 2   #2
 
   # Modality Dropout — desactivado para staging inicial
   modality_dropout: false
@@ -29,6 +29,9 @@ transformer_cfg:
   # Visual
   use_pixel_obs: true
   pixel_obs_shape: [64, 64, 3]
+  pixel_encoder_type: drqv2     # 'drqv2' (trainable) or 'resnet_frozen' (legacy)
+  freeze_encoder_after: 0
+  pretrained_encoder_path: "/home/bmancilla/archive/MaskDP/pretrained_encoders/drqbc_64px_convnet.pt"
 
   # This stays the same
   embd_pdrop: 0

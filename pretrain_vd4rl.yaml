@@ -10,9 +10,9 @@ discount: 0.99
 # Split configuration
 train_file_split: "train"
 eval_file_split: "eval"
-train_ratio: 0.8
-eval_ratio: 0.1
-bc_ratio: 0.1
+train_ratio: 1.0
+eval_ratio: 0.0
+bc_ratio: 0.0
 
 # train settings
 num_grad_steps: 100010
@@ -46,9 +46,9 @@ goal_buffer_num_workers: 4
 num_goal_eval_episodes: 20
 
 # return eval
-eval_T_cond: 16
-eval_T_pred: 48
-eval_replan_freq: 48
+eval_T_cond: 32
+eval_T_pred: 32
+eval_replan_freq: 32
 num_eval_episodes: 10
 
 # Pixel Observation

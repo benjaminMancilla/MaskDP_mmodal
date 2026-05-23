@@ -28,6 +28,13 @@ transformer_cfg:
   min_keep_states: 1
   min_keep_actions: 0
 
+  # Visual
+  use_pixel_obs: false
+  pixel_obs_shape: [64, 64, 3]
+  pixel_encoder_type: drqv2     # 'drqv2' (trainable) or 'resnet_frozen' (legacy)
+  freeze_encoder_after: 10000
+  pretrained_encoder_path: "/home/bmancilla/archive/MaskDP/pretrained_encoders/drqbc_64px_convnet.pt"
+
   # This stays the same
   embd_pdrop: 0
   resid_pdrop: 0

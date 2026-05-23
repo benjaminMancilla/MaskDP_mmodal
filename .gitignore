@@ -10,3 +10,4 @@ slurm/
 data/
 datasets/
 outputs/
+diagnose_out/

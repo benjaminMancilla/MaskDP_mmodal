@@ -149,6 +149,9 @@ def main(cfg):
         resume_dir = get_dir(cfg)
         payload = torch.load(resume_dir)
         agent.model.load_state_dict(payload["model"])
+        if agent.model.pixel_encoder is not None:
+            frozen = not any(p.requires_grad for p in agent.model.pixel_encoder.parameters())
+            print(f"[resume] pixel encoder frozen: {frozen}")
 
     domain = get_domain(cfg.task)
     if cfg.get("resume", False):
@@ -207,9 +210,9 @@ def main(cfg):
             obs_shape=(pixel_size, pixel_size, 3),
             action_shape=env.action_spec().shape,
             device=device,
-            T_cond=cfg.get("eval_T_cond", 16),
-            T_pred=cfg.get("eval_T_pred", 48),
-            replan_freq=cfg.get("eval_replan_freq", 48),
+            T_cond=cfg.get("eval_T_cond", 32),
+            T_pred=cfg.get("eval_T_pred", 32),
+            replan_freq=cfg.get("eval_replan_freq", 32),
             transformer_cfg=agent.model.config,
         )
 

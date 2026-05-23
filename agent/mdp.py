@@ -10,6 +10,7 @@ from dm_control.utils import rewards
 from einops import rearrange, reduce, repeat
 from agent.modules.attention import Block, CausalSelfAttention
 from agent.modules.pixel_encoder import PixelEncoder
+from agent.modules.load_pretrained_encoder import load_drqbc_convnet
 
 
 class MaskedDP(nn.Module):
@@ -50,11 +51,19 @@ class MaskedDP(nn.Module):
         self.use_pixel_obs = getattr(config, "use_pixel_obs", False)
         if self.use_pixel_obs:
             pixel_obs_shape = tuple(config.pixel_obs_shape)
-            self.pixel_encoder = PixelEncoder(pixel_obs_shape, self.n_embd)
+            pixel_encoder_type = str(getattr(config, "pixel_encoder_type", "drqv2"))
+            self.pixel_encoder = PixelEncoder(
+                pixel_obs_shape, self.n_embd, encoder_type=pixel_encoder_type
+            )
+            # Load DrQ-V2 CNN V-D4RL weights
+            pretrained_path = getattr(config, "pretrained_encoder_path", None)
+            if pretrained_path is not None:
+                load_drqbc_convnet(self.pixel_encoder, pretrained_path, freeze=True)
             self.state_embed = nn.Identity()
             trainable = sum(p.numel() for p in self.pixel_encoder.parameters() if p.requires_grad)
             total = sum(p.numel() for p in self.pixel_encoder.parameters())
-            print(f"[PixelEncoder] Trainable params: {trainable}/{total} (should be 0/{total})")
+            print(f"[PixelEncoder] type='{pixel_encoder_type}' | "
+                  f"trainable params: {trainable}/{total}")
         else:
             self.pixel_encoder = None
             self.state_embed = nn.Linear(obs_dim, self.n_embd)
@@ -297,7 +306,8 @@ class MaskedDPAgent:
         self.model = MaskedDP(obs_shape[0], action_shape[0], transformer_cfg).to(device)
         self.mask_ratio = mask_ratio
         # optimizers
-        self.opt = torch.optim.Adam(self.model.parameters(), lr=lr)
+        trainable_params = [p for p in self.model.parameters() if p.requires_grad]
+        self.opt = torch.optim.Adam(trainable_params, lr=lr)
         print(
             "number of parameters: %e", sum(p.numel() for p in self.model.parameters())
         )
@@ -308,9 +318,16 @@ class MaskedDPAgent:
         self.training = training
         self.model.train(training)
 
-    def update_mdp(self, states, actions):
+    def update_mdp(self, states, actions, step=0):
         metrics = dict()
         mask_ratio = np.random.choice(self.mask_ratio)
+        # Freeze pixel encoder after convergence (used in trainble CNN)
+        freeze_after = getattr(self.config, "freeze_encoder_after", 10000)
+        if step >= freeze_after and self.model.pixel_encoder is not None:
+            if any(p.requires_grad for p in self.model.pixel_encoder.parameters()):
+                for p in self.model.pixel_encoder.parameters():
+                    p.requires_grad = False
+                print(f"[step {step}] Pixel encoder frozen.")
         latent, mask, ids_restore, T, offset = self.model.forward_encoder(
             states, actions, mask_ratio
         )
@@ -379,6 +396,6 @@ class MaskedDPAgent:
         obs, action, _, _, _, _ = utils.to_torch(batch, self.device)
 
         # update critic
-        metrics.update(self.update_mdp(obs, action))
+        metrics.update(self.update_mdp(obs, action, step))
 
         return metrics
