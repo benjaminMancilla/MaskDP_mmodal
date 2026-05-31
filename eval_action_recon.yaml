@@ -1,0 +1,25 @@
+defaults:
+  - agent: mdp_action_recon
+  - _self_
+
+# task settings
+task: cheetah_run
+obs_type: pixels
+pixel_size: 64
+# eval 
+num_eval_episodes: 100
+# Global seed
+seed: 1
+# Dataset
+val_replay_dir: /home/bmancilla/archive/MaskDP/v_d4rl_data/main/cheetah_run/expert/64px
+# fraction of files used for validation.
+val_split_ratio: 0.2
+# snapshots
+eval_snapshots: null
+# misc
+device: cuda
+use_tb: false
+use_wandb: true
+project: maskdp-mm-vd4rl-action-recon
+notes: "action reconstruction eval — hierarchical vd4rl"
+exp_name: hier_action_recon_second_half_T64

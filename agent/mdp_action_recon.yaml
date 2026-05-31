@@ -1,0 +1,22 @@
+_target_: agent.mdp_action_recon.ActionReconstructionEvalAgent
+
+# Total sequence length used during evaluation
+T: 64
+
+# Masking scheme to apply.
+#   "second_half" : mask last T//2 timesteps (both states + actions)
+#                   Best for interpretable per-position curves
+#   "random"      : random masking on 2T interleaved sequence (like training)
+#                   mask_ratio drawn uniformly from the list below
+masking_scheme: second_half
+
+# Candidate mask ratios — only used when masking_scheme="random"
+mask_ratio:
+  - 0.15
+  - 0.35
+  - 0.55
+  - 0.75
+  - 0.95
+
+# Snapshot path
+path: null
