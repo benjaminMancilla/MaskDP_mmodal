@@ -1,0 +1,11 @@
+_target_: agent.mdp_action_recon.ActionReconstructionEvalAgentUnimodal
+
+T: 64
+masking_scheme: second_half
+mask_ratio:
+  - 0.15
+  - 0.35
+  - 0.55
+  - 0.75
+  - 0.95
+path: null
