@@ -1,4 +1,5 @@
-_target_: agent.mdp_action_recon.ActionReconstructionEvalAgent
+# agent/mdp_recon.yaml
+_target_: agent.mdp_recon.ReconstructionEvalAgent
 
 # Total sequence length used during evaluation
 T: 64
@@ -17,6 +18,12 @@ mask_ratio:
   - 0.55
   - 0.75
   - 0.95
+
+# Modality to evaluate.
+#   "actions" : action reconstruction loss only (W&B: maskdp-mm-vd4rl-action-recon)
+#   "states"  : state  reconstruction loss only (W&B: maskdp-mm-vd4rl-state-recon)
+#   "both"    : both losses, single forward pass per episode, logs to both projects
+modality: both
 
 # Snapshot path
 path: null
