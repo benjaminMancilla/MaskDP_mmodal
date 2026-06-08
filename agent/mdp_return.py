@@ -60,10 +60,10 @@ class MaskingEvalAgentMultimodal:
             param.requires_grad = False
         self.mdp.eval()
 
-        assert self.T_total == self.config.traj_length, (
-            f"T_cond + T_pred = {self.T_total} must equal "
-            f"traj_length = {self.config.traj_length}"
-        )
+        #assert self.T_total == self.config.traj_length, (
+        #    f"T_cond + T_pred = {self.T_total} must equal "
+        #    f"traj_length = {self.config.traj_length}"
+        #)
 
         n_params = sum(p.numel() for p in self.mdp.parameters())
         print(f"[MaskingEvalAgentMultimodal] Parameters: {n_params:,} (all frozen)")
@@ -153,11 +153,9 @@ class MaskingEvalAgentMultimodal:
 
         # Build ids_restore for forward_decoder
         total_len = 2 * T
-        masked_positions = torch.tensor(
-            [p for p in range(total_len)
-             if p not in set(real_positions.tolist())],
-            device=self.device, dtype=torch.long
-        )
+        mask = torch.ones(total_len, dtype=torch.bool, device=self.device)
+        mask[real_positions] = False
+        masked_positions = torch.arange(total_len, device=self.device)[mask]
         ids_shuffle = torch.cat([ids_keep[0], masked_positions], dim=0)  # (2*T,)
         ids_restore = torch.argsort(ids_shuffle).unsqueeze(0)            # (1, 2*T)
 

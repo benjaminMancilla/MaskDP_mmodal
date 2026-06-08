@@ -115,6 +115,10 @@ def main(cfg):
 
     wandb.init(**wandb_kwargs)
 
+    if cfg.use_wandb:
+        wandb.define_metric("eval/snapshot_step")
+        wandb.define_metric("eval/*", step_metric="eval/snapshot_step")
+
     snapshots = cfg.get("eval_snapshots", None)
     if snapshots is None or len(snapshots) == 0:
         assert cfg.agent.path is not None, "Either eval_snapshots or agent.path must be set."
@@ -148,7 +152,7 @@ def main(cfg):
         if cfg.use_wandb:
             wandb_data = {f"eval/{k}": v for k, v in metrics.items()}
             wandb_data["eval/snapshot_step"] = global_step
-            wandb.log(wandb_data, step=global_step)
+            wandb.log(wandb_data)
 
         print(f"  return={metrics['episode_return']:.2f} "
               f"(norm={metrics['episode_return_normalized']:.3f}) "
