@@ -9,6 +9,10 @@ T: 64
 #                   Best for interpretable per-position curves
 #   "random"      : random masking on 2T interleaved sequence (like training)
 #                   mask_ratio drawn uniformly from the list below
+#   "temporal_split" : flexible generalisation of second_half with configurable ratio
+#                      keep the first `split_ratio` fraction of timesteps visible,
+#                      mask the remaining (1 - split_ratio) fraction
+
 masking_scheme: second_half
 
 # Candidate mask ratios — only used when masking_scheme="random"
@@ -18,6 +22,10 @@ mask_ratio:
   - 0.55
   - 0.75
   - 0.95
+
+# Visible fraction for temporal_split — only used when masking_scheme="temporal_split".
+# Must be in (0, 1]
+split_ratio: 0.5
 
 # Modality to evaluate.
 #   "actions" : action reconstruction loss only (W&B: maskdp-mm-vd4rl-action-recon)

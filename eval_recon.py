@@ -146,6 +146,7 @@ def main(cfg):
         T=cfg.agent.T,
         masking_scheme=cfg.agent.masking_scheme,
         mask_ratio=list(cfg.agent.mask_ratio),
+        split_ratio=cfg.agent.split_ratio,
         modality=modality,
         path=first_snap,
     )
@@ -173,10 +174,16 @@ def main(cfg):
         # episode windows and (for random scheme) identical masking patterns.
         utils.set_seed_everywhere(cfg.seed)
  
+        scheme_detail = (
+            f"split_ratio={cfg.agent.split_ratio} | "
+            if cfg.agent.masking_scheme == "temporal_split"
+            else ""
+        )
         print(
             f"[Eval] step={global_step} | "
             f"T={cfg.agent.T} | scheme={cfg.agent.masking_scheme} | "
-            f"modality={modality} | episodes={cfg.num_eval_episodes} | seed={cfg.seed}"
+            + scheme_detail
+            + f"modality={modality} | episodes={cfg.num_eval_episodes} | seed={cfg.seed}"
         )
  
         metrics = agent.evaluate(val_episodes, cfg.num_eval_episodes)

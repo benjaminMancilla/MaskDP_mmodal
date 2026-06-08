@@ -33,6 +33,12 @@ class ReconstructionEvalAgent:
         Draw mask_ratio ~ Uniform(mask_ratio list).
         Apply random masking over the full 2T interleaved sequence with a single
         noise tensor — identical mechanism to training (forward_encoder).
+
+    "temporal_split"
+        Flexible generalisation of second_half with a configurable split ratio.
+        Keep the first `split_ratio` fraction of timesteps visible (context);
+        mask the remaining (1 - split_ratio) fraction.
+        split_ratio must be in (0, 1]
     """
 
     def __init__(
@@ -46,6 +52,7 @@ class ReconstructionEvalAgent:
         modality: str = "actions",
         path: Optional[str] = None,
         transformer_cfg=None,
+        split_ratio: float = 0.5,
         **kwargs,
     ):
         self.device = device
@@ -54,14 +61,18 @@ class ReconstructionEvalAgent:
         self.masking_scheme = masking_scheme
         self.mask_ratio = list(mask_ratio)
         self.modality = modality
+        self.split_ratio = split_ratio
 
-        assert masking_scheme in ("second_half", "random"), (
+        assert masking_scheme in ("second_half", "random", "temporal_split"), (
             f"Unknown masking_scheme '{masking_scheme}'. "
-            "Supported: 'second_half', 'random'."
+            "Supported: 'second_half', 'random', 'temporal_split'."
         )
         assert modality in ("actions", "states", "both"), (
             f"Unknown modality '{modality}'. "
             "Supported: 'actions', 'states', 'both'."
+        )
+        assert 0.0 < split_ratio <= 1.0, (
+            f"split_ratio must be in (0, 1]. Got {split_ratio}."
         )
 
         if path is not None:
@@ -91,10 +102,15 @@ class ReconstructionEvalAgent:
         self.mdp.eval()
 
         n_params = sum(p.numel() for p in self.mdp.parameters())
+        scheme_detail = (
+            f"split_ratio={split_ratio}" if masking_scheme == "temporal_split" else ""
+        )
         print(
             f"[ReconstructionEvalAgent] "
             f"Parameters: {n_params:,} (all frozen) | "
-            f"T={T} | scheme={masking_scheme} | modality={modality}"
+            f"T={T} | scheme={masking_scheme}"
+            + (f"({scheme_detail})" if scheme_detail else "")
+            + f" | modality={modality}"
         )
 
 
@@ -117,6 +133,12 @@ class ReconstructionEvalAgent:
             ids_keep = np.sort(ids_shuffle[:len_keep])  # sort to restore order
             mask_interleaved = np.ones(total_len, dtype=np.float32)
             mask_interleaved[ids_keep] = 0.0
+
+        elif self.masking_scheme == "temporal_split":
+            cut = int(T * self.split_ratio)
+            ids_keep = np.arange(2 * cut, dtype=np.int64)
+            mask_interleaved = np.zeros(total_len, dtype=np.float32)
+            mask_interleaved[2 * cut:] = 1.0
 
         else:
             raise ValueError(f"Unknown masking_scheme '{self.masking_scheme}'.")
