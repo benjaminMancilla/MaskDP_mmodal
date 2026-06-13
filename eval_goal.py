@@ -56,7 +56,8 @@ def eval_seq_bc(
     step, episode, total_dist2goal = 0, 0, []
     eval_until_episode = utils.Until(num_eval_episodes)
     batch = next(goal_iter)
-    start_obs, start_physics, goal_obs, goal_physics, timestep = utils.to_torch(
+    # replay_buffer always returns 6-tuple; goal_obs_prop is proprioceptive for L2
+    start_obs, start_physics, goal_obs, goal_obs_prop, goal_physics, timestep = utils.to_torch(
         batch, device
     )
 
@@ -77,7 +78,7 @@ def eval_seq_bc(
             obs = torch.cat((obs, obs_t.unsqueeze(0)), dim=0)
 
             dist = np.linalg.norm(
-                time_step.observation - goal_obs[episode].cpu().numpy()
+                time_step.observation - goal_obs_prop[episode].cpu().numpy()
             )
             dist2goal = min(dist2goal, dist)
             video_recorder.record(env)
@@ -108,7 +109,7 @@ def eval_bc(
     step, episode, total_dist2goal = 0, 0, []
     eval_until_episode = utils.Until(num_eval_episodes)
     batch = next(goal_iter)
-    start_obs, start_physics, goal_obs, goal_physics, timestep = utils.to_torch(
+    start_obs, start_physics, goal_obs, goal_obs_prop, goal_physics, timestep = utils.to_torch(
         batch, device
     )
 
@@ -127,7 +128,7 @@ def eval_bc(
             obs = np.asarray(time_step.observation)
             obs = torch.as_tensor(obs, device=device)
             dist = np.linalg.norm(
-                time_step.observation - goal_obs[episode].cpu().numpy()
+                time_step.observation - goal_obs_prop[episode].cpu().numpy()
             )
             dist2goal = min(dist2goal, dist)
             video_recorder.record(env)
@@ -155,14 +156,21 @@ def eval_mdp(
     num_eval_episodes,
     video_recorder,
     replan=False,
-    replan_freq=1
+    replan_freq=1,
+    domain="cheetah",
 ):
     step, episode, total_dist2goal = 0, 0, []
     eval_until_episode = utils.Until(num_eval_episodes)
     batch = next(goal_iter)
-    start_obs, start_physics, goal_obs, goal_physics, timestep = utils.to_torch(
+    # replay_buffer always returns 6-tuple; goal_obs_prop is proprioceptive for L2
+    start_obs, start_physics, goal_obs, goal_obs_prop, goal_physics, timestep = utils.to_torch(
         batch, device
     )
+
+    # Pixel mode: detect from agent and set render params
+    use_pixel_obs = getattr(agent.mdp, "use_pixel_obs", False)
+    pixel_size    = getattr(agent.mdp, "pixel_obs_shape", [64, 64, 3])[0]
+    camera_id     = {"quadruped": 2}.get(domain, 0)
 
     while eval_until_episode(episode):
         time_step = env.reset()
@@ -171,6 +179,7 @@ def eval_mdp(
         dist2goal = 1e6
         video_recorder.init(env, enabled=True)
         if replan is False:
+            # OPEN LOOP — start_obs already contains pixels or prop from buffer
             with torch.no_grad(), utils.eval_mode(agent):
                 actions = agent.act(
                     start_obs[episode].unsqueeze(0),
@@ -182,8 +191,9 @@ def eval_mdp(
                 time_step = env.step(a)
                 video_recorder.record(env)
                 step += 1
+                # L2 always in proprioceptive space
                 dist = np.linalg.norm(
-                    time_step.observation - goal_obs[episode].cpu().numpy()
+                    time_step.observation - goal_obs_prop[episode].cpu().numpy()
                 )
                 dist2goal = min(dist2goal, dist)
 
@@ -193,13 +203,10 @@ def eval_mdp(
             total_dist2goal.append(dist2goal)
         else:
             # CLOSED LOOP (RECEDING HORIZON CONTROL)
-            obs = start_obs[episode]
+            obs = start_obs[episode]  # pixels or prop — from buffer
             current_plan = None
-            
+
             for t in range(timestep[episode]):
-                # Replan if:
-                # 1. Is the first step (t=0)
-                # 2. Replan frequency is done
                 if t % replan_freq == 0:
                     time_remaining = timestep[episode] - t
                     with torch.no_grad(), utils.eval_mode(agent):
@@ -211,14 +218,23 @@ def eval_mdp(
 
                 plan_index = t % replan_freq
                 if plan_index >= len(current_plan):
-                     plan_index = -1
+                    plan_index = -1
 
                 action = current_plan[plan_index]
                 time_step = env.step(action)
-                obs = np.asarray(time_step.observation)
-                obs = torch.as_tensor(obs, device=device)
+
+                # Update obs for model: pixels or proprioceptive
+                if use_pixel_obs:
+                    frame = env.physics.render(
+                        height=pixel_size, width=pixel_size, camera_id=camera_id
+                    )
+                    obs = torch.as_tensor(frame, device=device)
+                else:
+                    obs = torch.as_tensor(time_step.observation, device=device)
+
+                # L2 always in proprioceptive space
                 dist = np.linalg.norm(
-                    time_step.observation - goal_obs[episode].cpu().numpy()
+                    time_step.observation - goal_obs_prop[episode].cpu().numpy()
                 )
                 dist2goal = min(dist2goal, dist)
                 video_recorder.record(env)
@@ -318,6 +334,10 @@ def main(cfg):
 
     print(f"goal buffer dir: {goal_dir}")
 
+    # Pixel mode: read from agent config saved in snapshot
+    goal_obs_mode = "pixels" if getattr(agent.config, "use_pixel_obs", False) else "states"
+    print(f"goal loader obs mode: {goal_obs_mode}")
+
     goal_loader = make_replay_loader(
         env,
         goal_dir,
@@ -330,6 +350,7 @@ def main(cfg):
         mode="goal",
         cfg=agent.config,
         relabel=False,
+        obs=goal_obs_mode,
     )
     goal_iter = iter(goal_loader)
 
@@ -355,6 +376,7 @@ def main(cfg):
                 video_recorder,
                 replan=cfg.replan,
                 replan_freq=cfg.get("replan_freq", 1),
+                domain=domain,
             )
         elif cfg.agent.name == "bc_goal":
             eval_bc(

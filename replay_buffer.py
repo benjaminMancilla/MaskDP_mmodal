@@ -159,10 +159,16 @@ class OfflineReplayBuffer(IterableDataset):
         episode = self._sample_episode()
         # add +1 for the first dummy transition
         idx = np.random.randint(0, episode_len(episode) - self._traj_length + 1) + 1
-        obs = episode["observation"][idx - 1 : idx - 1 + self._traj_length]
-        action = episode["action"][idx : idx + self._traj_length]
-        next_obs = episode["observation"][idx : idx + self._traj_length]
-        reward = episode["reward"][idx : idx + self._traj_length]
+
+        if self._obs == "pixels":
+            obs      = episode["pixel_observation"][idx - 1 : idx - 1 + self._traj_length]
+            next_obs = episode["pixel_observation"][idx : idx + self._traj_length]
+        else:
+            obs      = episode["observation"][idx - 1 : idx - 1 + self._traj_length]
+            next_obs = episode["observation"][idx : idx + self._traj_length]
+
+        action   = episode["action"][idx : idx + self._traj_length]
+        reward   = episode["reward"][idx : idx + self._traj_length]
         discount = episode["discount"][idx : idx + self._traj_length] * self._discount
         timestep = np.arange(idx - 1, idx + self._traj_length - 1)[:, np.newaxis]
         return (obs, action, reward, discount, next_obs, 0)
@@ -174,30 +180,43 @@ class OfflineReplayBuffer(IterableDataset):
         # add +1 for the first dummy transition
         start_idx = np.random.randint(0, max_start)
         length = np.random.randint(15, min(20, ep_len - start_idx))
-        start_obs = episode["observation"][start_idx]
+
         start_physics = episode["physics"][start_idx]
-        goal_obs = episode["observation"][start_idx + length - 1]
-        goal_physics = episode["physics"][start_idx + length - 1]
-        timestep = length - 1
-        # print(action.shape)
-        return (start_obs, start_physics, goal_obs, goal_physics, timestep)
+        goal_physics  = episode["physics"][start_idx + length - 1]
+        goal_obs_prop = episode["observation"][start_idx + length - 1]  # always prop, for L2
+        timestep      = length - 1
+
+        if self._obs == "pixels":
+            start_obs = episode["pixel_observation"][start_idx]
+            goal_obs  = episode["pixel_observation"][start_idx + length - 1]
+        else:
+            start_obs = episode["observation"][start_idx]
+            goal_obs  = goal_obs_prop  # same array in state mode
+
+        # Always 6-tuple: callers use goal_obs_prop for L2, goal_obs for model input
+        return (start_obs, start_physics, goal_obs, goal_obs_prop, goal_physics, timestep)
 
     def _sample_multiple_goal(self):
         episode = self._sample_episode()
         ep_len = episode_len(episode)
+        time_budget = np.array([12, 24, 36, 48, 60])  # fix: define before use
         max_start = max(1, ep_len - time_budget[-1] - 2)
         # add +1 for the first dummy transition
         start_idx = np.random.randint(0, max_start)
-        time_budget = np.array([12, 24, 36, 48, 60])
 
-        start_obs = episode["observation"][start_idx]
         start_physics = episode["physics"][start_idx]
+        goal_physics  = episode["physics"][start_idx + time_budget]
+        goal_prop     = episode["observation"][start_idx + time_budget]  # always prop, for L2
 
-        goal = episode["observation"][start_idx + time_budget]
-        goal_physics = episode["physics"][start_idx + time_budget]
+        if self._obs == "pixels":
+            start_obs = episode["pixel_observation"][start_idx]
+            goal      = episode["pixel_observation"][start_idx + time_budget]
+        else:
+            start_obs = episode["observation"][start_idx]
+            goal      = goal_prop  # same array in state mode
 
-        # print(action.shape)
-        return (start_obs, start_physics, goal, goal_physics, time_budget)
+        # Always 6-tuple: callers use goal_prop for L2, goal for model input
+        return (start_obs, start_physics, goal, goal_prop, goal_physics, time_budget)
 
     def _sample_context(self):
         episode = self._sample_episode()

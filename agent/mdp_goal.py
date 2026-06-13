@@ -148,8 +148,8 @@ class MDP_MM_GoalAgent:
             attn_mask = self.mdp.attn_mask
 
         # ENCODER PHASE
-        s_emb = self.mdp.state_embed(obs) + enc_pos_embed[:, 0:1]       # [B, 1, enc_n_embd]
-        g_emb = self.mdp.state_embed(goal) + enc_pos_embed[:, 2*T:2*T+1]
+        s_emb = self.mdp._embed_states(obs) + enc_pos_embed[:, 0:1]     # [B, 1, enc_n_embd]
+        g_emb = self.mdp._embed_states(goal) + enc_pos_embed[:, 2*T:2*T+1]
         s_enc_input = torch.cat([s_emb, g_emb], dim=1)                  # [B, 2, enc_n_embd]
 
         # Placeholder de acciones en enc_n_embd (enc_mask_token si existe, mask_token si no)
@@ -272,8 +272,8 @@ class MDP_MM_GoalAgent:
             decoder_pos_embed = self.mdp.decoder_pos_embed
             attn_mask = self.mdp.attn_mask
 
-        s_emb = self.mdp.state_embed(obs) + pos_embed[:, 0]
-        g_emb = self.mdp.state_embed(goal) + pos_embed[:, 2 * T]
+        s_emb = self.mdp._embed_states(obs) + pos_embed[:, 0]
+        g_emb = self.mdp._embed_states(goal) + pos_embed[:, 2 * T]
         
         # encoder
         x = torch.cat([s_emb, g_emb], dim=1)
@@ -324,8 +324,8 @@ class MDP_MM_GoalAgent:
 
 
         # ENCODER PHASE
-        s_emb = self.mdp.state_embed(obs) + enc_pos_embed[:, 0:1]  # [B, 1, D]
-        g_emb = self.mdp.state_embed(goal) + enc_pos_embed[:, time_budgets * 2]  # [B, num_goals, D]
+        s_emb = self.mdp._embed_states(obs) + enc_pos_embed[:, 0:1]  # [B, 1, D]
+        g_emb = self.mdp._embed_states(goal) + enc_pos_embed[:, time_budgets * 2]  # [B, num_goals, D]
         s_enc_input = torch.cat([s_emb, g_emb], dim=1)  # [B, num_goals+1, D]
 
         _enc_mtok = getattr(self.mdp, 'enc_mask_token', self.mdp.mask_token)
@@ -444,8 +444,8 @@ class MDP_MM_GoalAgent:
             decoder_pos_embed = self.mdp.decoder_pos_embed
             attn_mask = self.mdp.attn_mask
 
-        s_emb = self.mdp.state_embed(obs) + pos_embed[:, 0]
-        g_emb = self.mdp.state_embed(goal) + pos_embed[:, time_budgets * 2]
+        s_emb = self.mdp._embed_states(obs) + pos_embed[:, 0]
+        g_emb = self.mdp._embed_states(goal) + pos_embed[:, time_budgets * 2]
         
         # encoder
         x = torch.cat([s_emb, g_emb], dim=1)
