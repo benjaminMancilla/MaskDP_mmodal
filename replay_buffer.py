@@ -76,6 +76,7 @@ class OfflineReplayBuffer(IterableDataset):
         train_ratio=0.8,
         eval_ratio=0.1,
         bc_ratio=0.1,
+        frame_stack: int = 1,
     ):
         self._env = env
         self._replay_dir = replay_dir
@@ -92,6 +93,7 @@ class OfflineReplayBuffer(IterableDataset):
         self._cfg = cfg
         self._relabel = relabel
         self._obs = obs
+        self._frame_stack = frame_stack
 
         assert abs(train_ratio + eval_ratio + bc_ratio - 1.0) < 1e-6, \
             f"train_ratio + eval_ratio + bc_ratio debe ser 1.0, got {train_ratio + eval_ratio + bc_ratio}"
@@ -100,8 +102,6 @@ class OfflineReplayBuffer(IterableDataset):
         self._train_ratio = train_ratio
         self._eval_ratio = eval_ratio
         self._bc_ratio = bc_ratio
-        # print('seed', np.random.get_state()[1][0])
-        # random.seed(np.random.get_state()[1][0])
 
     def _load(self, relable=True):
         if relable:
@@ -120,7 +120,7 @@ class OfflineReplayBuffer(IterableDataset):
             n_total = len(eps_fns)
             n_train = int(n_total * self._train_ratio)
             n_eval  = int(n_total * self._eval_ratio)
-            n_bc    = int(n_total * self._bc_ratio) 
+            n_bc    = int(n_total * self._bc_ratio)
 
             if self._file_split == "train":
                 eps_fns = eps_fns[:n_train]
@@ -145,6 +145,24 @@ class OfflineReplayBuffer(IterableDataset):
             self._episodes[eps_fn] = episode
             self._size += episode_len(episode)
 
+    def _stack_pixel_frames(self, frames, indices, k):
+        """
+        Build a frame-stacked observation for each requested token.
+
+        Args:
+            frames:  (N_ep, H, W, 3) uint8 — full episode pixel observations.
+            indices: 1-D int array of absolute episode indices (0-indexed).
+            k:       number of frames to stack (oldest → newest).
+        """
+        # j=0 oldest frame, j=k-1 newest frame
+        idxs = np.stack(
+            [np.clip(indices - (k - 1 - j), 0, None) for j in range(k)],
+            axis=1,
+        )  # (n, k)
+        stacked = frames[idxs]  # (n, k, H, W, 3) — fancy indexing always copies
+        # Concatenate frames along the channel axis: oldest RGB first
+        return np.concatenate([stacked[:, j] for j in range(k)], axis=-1)  # (n, H, W, k*3)
+
     def _sample_episode(self):
         if not self._loaded:
             self._load(self._relabel)
@@ -161,11 +179,21 @@ class OfflineReplayBuffer(IterableDataset):
         idx = np.random.randint(0, episode_len(episode) - self._traj_length + 1) + 1
 
         if self._obs == "pixels":
-            obs      = episode["pixel_observation"][idx - 1 : idx - 1 + self._traj_length]
-            next_obs = episode["pixel_observation"][idx : idx + self._traj_length]
+            # Auto-detect pixel key:
+            #   MaskDP custom dataset = "pixel_observation" (proprioceptive in "observation")
+            #   V-D4RL dataset        = "observation" (no separate pixel_observation key)
+            frames = episode.get("pixel_observation", episode["observation"])
+            if self._frame_stack > 1:
+                obs_abs      = np.arange(idx - 1, idx - 1 + self._traj_length)
+                next_obs_abs = np.arange(idx,     idx     + self._traj_length)
+                obs      = self._stack_pixel_frames(frames, obs_abs,      self._frame_stack)
+                next_obs = self._stack_pixel_frames(frames, next_obs_abs, self._frame_stack)
+            else:
+                obs      = frames[idx - 1 : idx - 1 + self._traj_length]
+                next_obs = frames[idx     : idx     + self._traj_length]
         else:
             obs      = episode["observation"][idx - 1 : idx - 1 + self._traj_length]
-            next_obs = episode["observation"][idx : idx + self._traj_length]
+            next_obs = episode["observation"][idx     : idx     + self._traj_length]
 
         action   = episode["action"][idx : idx + self._traj_length]
         reward   = episode["reward"][idx : idx + self._traj_length]
@@ -179,43 +207,65 @@ class OfflineReplayBuffer(IterableDataset):
         max_start = max(1, ep_len - 30)
         # add +1 for the first dummy transition
         start_idx = np.random.randint(0, max_start)
-        length = np.random.randint(15, min(20, ep_len - start_idx))
+        length    = np.random.randint(15, min(20, ep_len - start_idx))
+        goal_idx  = start_idx + length - 1
 
         start_physics = episode["physics"][start_idx]
-        goal_physics  = episode["physics"][start_idx + length - 1]
-        goal_obs_prop = episode["observation"][start_idx + length - 1]  # always prop, for L2
-        timestep      = length - 1
+        goal_physics  = episode["physics"][goal_idx]
+        # goal_obs_prop: always proprioceptive "observation", used for the L2 metric
+        goal_obs_prop = episode["observation"][goal_idx]
+        timestep = length - 1
 
         if self._obs == "pixels":
-            start_obs = episode["pixel_observation"][start_idx]
-            goal_obs  = episode["pixel_observation"][start_idx + length - 1]
+            frames = episode.get("pixel_observation", episode["observation"])
+            if self._frame_stack > 1:
+                start_obs = self._stack_pixel_frames(
+                    frames, np.array([start_idx]), self._frame_stack
+                )[0]  # (H, W, 3*k)
+                goal_obs = self._stack_pixel_frames(
+                    frames, np.array([goal_idx]), self._frame_stack
+                )[0]  # (H, W, 3*k)
+            else:
+                start_obs = frames[start_idx]
+                goal_obs  = frames[goal_idx]
         else:
             start_obs = episode["observation"][start_idx]
             goal_obs  = goal_obs_prop  # same array in state mode
 
-        # Always 6-tuple: callers use goal_obs_prop for L2, goal_obs for model input
+        # 6-tuple: callers use goal_obs_prop (prop) for L2, goal_obs for model input
         return (start_obs, start_physics, goal_obs, goal_obs_prop, goal_physics, timestep)
 
     def _sample_multiple_goal(self):
         episode = self._sample_episode()
         ep_len = episode_len(episode)
-        time_budget = np.array([12, 24, 36, 48, 60])  # fix: define before use
-        max_start = max(1, ep_len - time_budget[-1] - 2)
+        time_budget  = np.array([12, 24, 36, 48, 60])
+        max_start    = max(1, ep_len - time_budget[-1] - 2)
         # add +1 for the first dummy transition
-        start_idx = np.random.randint(0, max_start)
+        start_idx    = np.random.randint(0, max_start)
+        goal_indices = start_idx + time_budget  # absolute episode indices, shape (5,)
 
         start_physics = episode["physics"][start_idx]
-        goal_physics  = episode["physics"][start_idx + time_budget]
-        goal_prop     = episode["observation"][start_idx + time_budget]  # always prop, for L2
+        goal_physics  = episode["physics"][goal_indices]
+        # goal_prop: always proprioceptive, for L2 metric
+        goal_prop = episode["observation"][goal_indices]
 
         if self._obs == "pixels":
-            start_obs = episode["pixel_observation"][start_idx]
-            goal      = episode["pixel_observation"][start_idx + time_budget]
+            frames = episode.get("pixel_observation", episode["observation"])
+            if self._frame_stack > 1:
+                start_obs = self._stack_pixel_frames(
+                    frames, np.array([start_idx]), self._frame_stack
+                )[0]  # (H, W, 3*k)
+                goal = self._stack_pixel_frames(
+                    frames, goal_indices, self._frame_stack
+                )  # (5, H, W, 3*k)
+            else:
+                start_obs = frames[start_idx]
+                goal      = frames[goal_indices]
         else:
             start_obs = episode["observation"][start_idx]
             goal      = goal_prop  # same array in state mode
 
-        # Always 6-tuple: callers use goal_prop for L2, goal for model input
+        # 6-tuple: callers use goal_prop (prop) for L2, goal for model input
         return (start_obs, start_physics, goal, goal_prop, goal_physics, time_budget)
 
     def _sample_context(self):
@@ -223,7 +273,6 @@ class OfflineReplayBuffer(IterableDataset):
         context_length = self._cfg.context_length
         forecast_length = self._cfg.forecast_length
         # add +1 for the first dummy transition
-        # idx = np.random.randint(0, 50 - context_length+ 1) + 1
         start_idx = np.random.randint(100, 850)
         obs = episode["observation"][
             start_idx - 1 : start_idx + context_length
@@ -274,6 +323,7 @@ def make_replay_loader(
     train_ratio=0.8,
     eval_ratio=0.1,
     bc_ratio=0.1,
+    frame_stack: int = 1,
 ):
     max_size_per_worker = max_size // max(1, num_workers)
 
@@ -293,6 +343,7 @@ def make_replay_loader(
         train_ratio=train_ratio,
         eval_ratio=eval_ratio,
         bc_ratio=bc_ratio,
+        frame_stack=frame_stack,
     )
 
     loader = torch.utils.data.DataLoader(

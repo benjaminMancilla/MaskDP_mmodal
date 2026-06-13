@@ -1062,9 +1062,15 @@ class MaskedDPMultimodalAgent:
         pred_s, pred_a = self.model.forward_decoder(
             x_fused, ids_restore
         )
-        
+
+        # Embed raw obs -> latent target, mirroring update_mdp exactly.
+        # In pixel mode obs is (B, T, H, W, C) — passing it raw to forward_loss
+        # causes a shape error and computes the wrong loss.
+        with torch.no_grad():
+            target_s = self.model._embed_states(obs)
+
         mask_loss, state_loss, action_loss = self.model.forward_loss(
-            obs, action, pred_s, pred_a, mask
+            target_s, action, pred_s, pred_a, mask
         )
 
         if self.use_tb:

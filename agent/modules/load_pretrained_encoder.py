@@ -6,6 +6,13 @@ import torch.nn as nn
 def load_drqbc_convnet(encoder, ckpt_path: str, freeze: bool = True):
     """
     Load pretrained DrQBC convnet weights into a DrQv2Encoder instance.
+
+    Two paths:
+    - Direct load  : encoder was built with obs_shape=(64,64,9); all shapes match the
+                     checkpoint; no weight transformation is applied.
+    - Surgery path : encoder was built with obs_shape=(64,64,3); first conv is adapted
+                     by averaging over the 3 frame-stack groups.  Kept for reproducibility
+                     of older single-frame experiments.
     """
     ckpt = torch.load(ckpt_path, map_location="cpu")
     pretrained_sd = ckpt["convnet"]
@@ -13,28 +20,28 @@ def load_drqbc_convnet(encoder, ckpt_path: str, freeze: bool = True):
     current_sd = encoder.convnet.state_dict()
 
     new_sd = {}
+    _surgery_applied = False
+
     for key in pretrained_sd:
         pretrained_w = pretrained_sd[key]
         current_w    = current_sd[key]
 
         if pretrained_w.shape == current_w.shape:
-            # Layers 2,4,6  shapes match, load directly
             new_sd[key] = pretrained_w
 
         elif key == "0.weight":
-            # First conv: pretrained (32, 9, 3, 3)
-            # Average over the 3 framestack groups
+            # Surgery: pretrained (32, 9, 3, 3) -> current (32, 3, 3, 3)
             assert pretrained_w.shape == (32, 9, 3, 3), \
                 f"Unexpected shape for first conv: {pretrained_w.shape}"
             assert current_w.shape == (32, 3, 3, 3), \
                 f"Unexpected shape in MaskDP first conv: {current_w.shape}"
             new_w = pretrained_w.reshape(32, 3, 3, 3, 3).mean(dim=1)
             new_sd[key] = new_w
-            print(f"  [load_drqbc_convnet] Adapted first conv: "
-                  f"{pretrained_w.shape} → {new_w.shape} (mean over framestack groups)")
+            _surgery_applied = True
+            print(f"  [load_drqbc_convnet] SURGERY: adapted first conv "
+                  f"{pretrained_w.shape} -> {new_w.shape} (mean over frame-stack groups)")
 
         else:
-            # Bias of first conv or unexpected mismatch
             if pretrained_w.shape == current_w.shape:
                 new_sd[key] = pretrained_w
             else:
@@ -46,10 +53,14 @@ def load_drqbc_convnet(encoder, ckpt_path: str, freeze: bool = True):
     assert len(missing) == 0,    f"Missing keys: {missing}"
     assert len(unexpected) == 0, f"Unexpected keys: {unexpected}"
 
+    if _surgery_applied:
+        print("  [load_drqbc_convnet] SURGERY path taken — first conv averaged over 3 frame-stack groups")
+    else:
+        print("  [load_drqbc_convnet] Direct load, NO surgery — all weight shapes matched")
+
     if freeze:
         for p in encoder.convnet.parameters():
             p.requires_grad = False
-        # Freeze projection head too
         for p in encoder.projection.parameters():
             p.requires_grad = False
         print(f"  [load_drqbc_convnet] Convnet and projection frozen.")
@@ -61,8 +72,8 @@ def load_drqbc_convnet(encoder, ckpt_path: str, freeze: bool = True):
     return encoder
 
 
-def verify_load(ckpt_path: str, obs_shape=(64, 64, 3), feature_dim=256):
-    """Quick sanity check, instantiate encoder, load weights, run a dummy forward."""
+def verify_load(ckpt_path: str, obs_shape=(64, 64, 9), feature_dim=256):
+    """Quick sanity check: instantiate encoder, load weights, run a dummy forward."""
     import sys
     sys.path.insert(0, str(Path(__file__).parent))
     from pixel_encoder import DrQv2Encoder
@@ -82,5 +93,6 @@ if __name__ == "__main__":
     import argparse
     p = argparse.ArgumentParser()
     p.add_argument("--ckpt", required=True)
+    p.add_argument("--obs_shape", nargs=3, type=int, default=[64, 64, 9])
     args = p.parse_args()
-    verify_load(args.ckpt)
+    verify_load(args.ckpt, obs_shape=tuple(args.obs_shape))

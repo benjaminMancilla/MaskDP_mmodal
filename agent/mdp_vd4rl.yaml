@@ -59,7 +59,7 @@ transformer_cfg:
 
   # Visual
   use_pixel_obs: true
-  pixel_obs_shape: [64, 64, 3]
+  pixel_obs_shape: [64, 64, 9]
   pixel_encoder_type: drqv2
   freeze_encoder_after: 0
   pretrained_encoder_path: "/home/bmancilla/archive/MaskDP/pretrained_encoders/drqbc_64px_convnet.pt"

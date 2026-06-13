@@ -54,6 +54,7 @@ pixel_size: 64
 eval_T_cond: 32
 eval_T_pred: 32
 eval_replan_freq: 32
+frame_stack: 3
 
 # Miscelaneous
 seed: 1

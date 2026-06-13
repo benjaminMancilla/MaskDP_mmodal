@@ -292,6 +292,8 @@ def main(cfg):
       f"train={cfg.get('train_ratio', 0.8)} eval={cfg.get('eval_ratio', 0.1)} "
       f"bc={cfg.get('bc_ratio', 0.1)}")
 
+    _frame_stack = cfg.get("frame_stack", 1)
+
     train_loader = make_replay_loader(
         env,
         replay_train_dir,
@@ -302,6 +304,8 @@ def main(cfg):
         domain,
         cfg.agent.transformer_cfg.traj_length,
         relabel=False,
+        obs=obs_type,
+        frame_stack=_frame_stack,
         file_split=cfg.get("train_file_split", "all"),
         train_ratio=cfg.get("train_ratio", 0.8),
         eval_ratio=cfg.get("eval_ratio", 0.1),
@@ -311,7 +315,8 @@ def main(cfg):
 
     # Create RETRUN evaluation loader
     eval_agent = None
-    if cfg.get("obs_type", "states") == "pixels":
+    # Return eval requires env-side frame stacking (Tarea 3). Guard until that is done.
+    if cfg.get("obs_type", "states") == "pixels" and _frame_stack == 1:
         pixel_size = cfg.get("pixel_size", 64)
         eval_agent = mdp_return_module.MaskingEvalAgentMultimodal(
             obs_shape=(pixel_size, pixel_size, 3),
@@ -342,9 +347,12 @@ def main(cfg):
                 mode="goal",
                 cfg=cfg.agent.transformer_cfg,
                 relabel=False,
+                obs=obs_type,
+                frame_stack=_frame_stack,
                 file_split=cfg.get("eval_file_split", "all"),
                 train_ratio=cfg.get("train_ratio", 0.8),
                 eval_ratio=cfg.get("eval_ratio", 0.1),
+                bc_ratio=cfg.get("bc_ratio", 0.1),
             )
             goal_iter = iter(goal_loader)
             video_recorder = VideoRecorder(work_dir if cfg.save_video else None)
