@@ -83,7 +83,7 @@ def eval_goal_reaching(
     step, episode, total_dist2goal = 0, 0, []
     eval_until_episode = utils.Until(num_eval_episodes)
     batch = next(goal_iter)
-    start_obs, start_physics, goal_obs, goal_physics, timestep = utils.to_torch(
+    start_obs, start_physics, goal_obs, goal_obs_prop, goal_physics, timestep = utils.to_torch(
         batch, device
     )
 
@@ -107,7 +107,7 @@ def eval_goal_reaching(
                 time_step = env.step(a)
                 step += 1
                 dist = np.linalg.norm(
-                    time_step.observation - goal_obs[episode].cpu().numpy()
+                    time_step.physics - goal_physics[episode].cpu().numpy()
                 )
                 dist2goal = min(dist2goal, dist)
         else:
@@ -122,9 +122,11 @@ def eval_goal_reaching(
                     )[0, ...]
                 time_step = env.step(action)
                 obs = np.asarray(time_step.observation)
+                if obs.ndim == 3:  # pixel mode: CHW (C*k,H,W) -> HWC (H,W,C*k)
+                    obs = obs.transpose(1, 2, 0)
                 obs = torch.as_tensor(obs, device=device)
                 dist = np.linalg.norm(
-                    time_step.observation - goal_obs[episode].cpu().numpy()
+                    time_step.physics - goal_physics[episode].cpu().numpy()
                 )
                 dist2goal = min(dist2goal, dist)
                 step += 1
@@ -148,10 +150,11 @@ def main(cfg):
     device = torch.device(cfg.device)
 
     # create envs
-    obs_type   = cfg.get("obs_type", "states")
-    pixel_size = cfg.get("pixel_size", 84)
+    obs_type     = cfg.get("obs_type", "states")
+    pixel_size   = cfg.get("pixel_size", 84)
+    _frame_stack = cfg.get("frame_stack", 1)
     env = dmc.make(cfg.task, seed=cfg.seed, obs_type=obs_type, pixel_size=pixel_size,
-               action_repeat=cfg.get("action_repeat", 2))
+               action_repeat=cfg.get("action_repeat", 2), frame_stack=_frame_stack)
 
     # create agent
     agent = hydra.utils.instantiate(
@@ -292,8 +295,6 @@ def main(cfg):
       f"train={cfg.get('train_ratio', 0.8)} eval={cfg.get('eval_ratio', 0.1)} "
       f"bc={cfg.get('bc_ratio', 0.1)}")
 
-    _frame_stack = cfg.get("frame_stack", 1)
-
     train_loader = make_replay_loader(
         env,
         replay_train_dir,
@@ -315,11 +316,9 @@ def main(cfg):
 
     # Create RETRUN evaluation loader
     eval_agent = None
-    # Return eval requires env-side frame stacking (Tarea 3). Guard until that is done.
-    if cfg.get("obs_type", "states") == "pixels" and _frame_stack == 1:
-        pixel_size = cfg.get("pixel_size", 64)
+    if obs_type == "pixels":
         eval_agent = mdp_return_module.MaskingEvalAgentMultimodal(
-            obs_shape=(pixel_size, pixel_size, 3),
+            obs_shape=env.observation_spec().shape,
             action_shape=env.action_spec().shape,
             device=device,
             T_cond=cfg.get("eval_T_cond", 32),

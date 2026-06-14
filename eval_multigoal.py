@@ -56,7 +56,7 @@ def eval_seq_bc(
     step, episode, total_dist2goal = 0, 0, []
     eval_until_episode = utils.Until(num_eval_episodes)
     batch = next(goal_iter)
-    start_obs, start_physics, goal, goal_physics, time_budget = utils.to_torch(
+    start_obs, start_physics, goal, goal_prop, goal_physics, time_budget = utils.to_torch(
         batch, device
     )
 
@@ -120,7 +120,7 @@ def eval_bc(
     step, episode, total_dist2goal = 0, 0, []
     eval_until_episode = utils.Until(num_eval_episodes)
     batch = next(goal_iter)
-    start_obs, start_physics, goal, goal_physics, time_budget = utils.to_torch(
+    start_obs, start_physics, goal, goal_prop, goal_physics, time_budget = utils.to_torch(
         batch, device
     )
 
@@ -182,7 +182,7 @@ def eval_mdp(
     step, episode, total_dist2goal = 0, 0, []
     eval_until_episode = utils.Until(num_eval_episodes)
     batch = next(goal_iter)
-    start_obs, start_physics, goal, goal_physics, time_budget = utils.to_torch(
+    start_obs, start_physics, goal, goal_prop, goal_physics, time_budget = utils.to_torch(
         batch, device
     )
 
@@ -198,20 +198,20 @@ def eval_mdp(
                     start_obs[episode].unsqueeze(0), goal[episode], time_budget[episode]
                 )
 
-            states = []
+            physics_states = []
             for a in actions:
                 time_step = env.step(a)
                 video_recorder.record(env)
-                states.append(np.asarray(time_step.observation))
-            states = np.array(states)
+                physics_states.append(np.asarray(time_step.physics))
+            physics_states = np.array(physics_states)
             episode_dist = []
             episode_budget = time_budget[episode]
 
             for i in range(len(episode_budget)):
                 dist2goal = 1e5
-                current_goal = goal[episode, i]
-                for t in range(len(states)):
-                    dist = np.linalg.norm(states[t] - current_goal.cpu().numpy())
+                current_goal_phys = goal_physics[episode, i].cpu().numpy()
+                for t in range(len(physics_states)):
+                    dist = np.linalg.norm(physics_states[t] - current_goal_phys)
                     dist2goal = min(dist2goal, dist)
 
                 episode_dist.append(dist2goal)
@@ -226,7 +226,7 @@ def eval_mdp(
             episode_budget = time_budget[episode]
             total_episode_budget = episode_budget[-1]
             goal_index = 0
-            states = []
+            physics_states = []
 
             current_plan = None
             steps_since_replan = 0
@@ -250,7 +250,7 @@ def eval_mdp(
                             time_budget[episode, goal_index:] - i,
                         )
                     steps_since_replan = 0
-                    
+
                 if steps_since_replan >= len(current_plan):
                     action = current_plan[-1]
                 else:
@@ -259,19 +259,21 @@ def eval_mdp(
                 time_step = env.step(action)
                 video_recorder.record(env)
                 obs = np.asarray(time_step.observation)
+                if obs.ndim == 3:  # pixel mode: CHW (C*k,H,W) → HWC (H,W,C*k)
+                    obs = obs.transpose(1, 2, 0)
                 obs = torch.as_tensor(obs, device=device)
-                states.append(np.asarray(time_step.observation))
+                physics_states.append(np.asarray(time_step.physics))
                 steps_since_replan += 1
 
-            states = np.array(states)
+            physics_states = np.array(physics_states)
             episode_dist = []
             episode_budget = time_budget[episode]
 
             for i in range(len(episode_budget)):
                 dist2goal = 1e5
-                current_goal = goal[episode, i]
-                for t in range(len(states)):
-                    dist = np.linalg.norm(states[t] - current_goal.cpu().numpy())
+                current_goal_phys = goal_physics[episode, i].cpu().numpy()
+                for t in range(len(physics_states)):
+                    dist = np.linalg.norm(physics_states[t] - current_goal_phys)
                     dist2goal = min(dist2goal, dist)
 
                 episode_dist.append(dist2goal)
@@ -300,7 +302,11 @@ def main(cfg):
     device = torch.device(cfg.device)
 
     # create envs
-    env = dmc.make(cfg.task, seed=cfg.seed)
+    obs_type     = cfg.get("obs_type", "states")
+    pixel_size   = cfg.get("pixel_size", 64)
+    _frame_stack = cfg.get("frame_stack", 1)
+    env = dmc.make(cfg.task, seed=cfg.seed, obs_type=obs_type, pixel_size=pixel_size,
+                   action_repeat=cfg.get("action_repeat", 2), frame_stack=_frame_stack)
 
     # create agent
     path = get_dir(cfg)
@@ -361,6 +367,8 @@ def main(cfg):
         mode="multi_goal",
         cfg=agent.config,
         relabel=False,
+        obs=obs_type,
+        frame_stack=_frame_stack,
     )
     goal_iter = iter(goal_loader)
 
@@ -374,7 +382,7 @@ def main(cfg):
 
     if eval_every_step(global_step):
         logger.log("eval_total_time", timer.total_time(), global_step)
-        if cfg.agent.name == "mdp_goal":
+        if cfg.agent.name in ["mdp_goal", "mdp_mm_goal"]:
             eval_mdp(
                 global_step,
                 agent,
