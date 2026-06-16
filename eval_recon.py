@@ -6,7 +6,7 @@ os.environ["MKL_SERVICE_FORCE_INTEL"] = "1"
 os.environ["MUJOCO_GL"] = "egl"
 
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import hydra
 import numpy as np
@@ -55,6 +55,18 @@ def load_val_episodes(replay_dir: str, val_split_ratio: float) -> List[Dict]:
         episodes.append(ep)
 
     return episodes
+
+
+def _infer_obs_shape(episodes: List[Dict], obs_type: str, frame_stack: int) -> Tuple:
+    first = episodes[0]
+    if obs_type == "pixels":
+        if "pixel_observation" in first:
+            H, W, C = first["pixel_observation"].shape[1:]   # C=3 (single frame)
+        else:
+            H, W, C = first["observation"].shape[1:]          # VD4RL: already pixels
+        return (H, W, C * frame_stack)
+    else:
+        return first["observation"].shape[1:]   # (obs_dim,) for proprioceptive
 
 
 def _log_modality_to_wandb(
@@ -119,25 +131,27 @@ def _init_wandb_run(project: str, exp_name: str, cfg) -> wandb.sdk.wandb_run.Run
 def main(cfg):
     work_dir = Path.cwd()
     print(f"workspace: {work_dir}")
- 
-    device   = torch.device(cfg.device)
-    modality = cfg.agent.modality
- 
+
+    device      = torch.device(cfg.device)
+    modality    = cfg.agent.modality
+    obs_type    = str(cfg.agent.obs_type)
+    frame_stack = int(cfg.agent.frame_stack)
+
     val_episodes = load_val_episodes(cfg.val_replay_dir, cfg.val_split_ratio)
- 
-    first_ep     = val_episodes[0]
-    obs_shape    = first_ep["observation"].shape[1:]   # (H, W, C)
-    action_dim   = first_ep["action"].shape[1]
+
+    obs_shape  = _infer_obs_shape(val_episodes, obs_type, frame_stack)
+    action_dim   = val_episodes[0]["action"].shape[1]
     action_shape = (action_dim,)
-    print(f"obs_shape={obs_shape}, action_shape={action_shape}")
- 
+    print(f"obs_type={obs_type}  frame_stack={frame_stack}  "
+          f"obs_shape={obs_shape}  action_shape={action_shape}")
+
     snapshots = cfg.get("eval_snapshots", None)
     if snapshots is None or len(snapshots) == 0:
         assert cfg.agent.path is not None, (
             "Provide eval_snapshots=[...] or agent.path=... in the config."
         )
         snapshots = [cfg.agent.path]
- 
+
     first_snap = str(snapshots[0])
     agent = ReconstructionEvalAgent(
         obs_shape=obs_shape,
@@ -148,32 +162,34 @@ def main(cfg):
         mask_ratio=list(cfg.agent.mask_ratio),
         split_ratio=cfg.agent.split_ratio,
         modality=modality,
+        obs_type=obs_type,        # NEW
+        frame_stack=frame_stack,  # NEW
         path=first_snap,
     )
- 
+
     exp_name = str(cfg.exp_name)
- 
+
     # Eval loop
     # Accumulate all metrics before touching W&B.
     all_results: List[tuple] = []   # [(global_step, metrics), ...]
- 
+
     for snap_path in snapshots:
         snap_path = str(snap_path)
         print(f"\n[Eval] Loading snapshot: {snap_path}")
- 
+
         payload = torch.load(snap_path, map_location=device)
         agent.mdp.load_state_dict(payload["model"])
         agent.mdp.eval()
- 
+
         try:
             global_step = int(Path(snap_path).stem.split("_")[-1])
         except Exception:
             global_step = 0
- 
+
         # Re-seed before every snapshot: guarantees all models see identical
         # episode windows and (for random scheme) identical masking patterns.
         utils.set_seed_everywhere(cfg.seed)
- 
+
         scheme_detail = (
             f"split_ratio={cfg.agent.split_ratio} | "
             if cfg.agent.masking_scheme == "temporal_split"
@@ -185,10 +201,10 @@ def main(cfg):
             + scheme_detail
             + f"modality={modality} | episodes={cfg.num_eval_episodes} | seed={cfg.seed}"
         )
- 
+
         metrics = agent.evaluate(val_episodes, cfg.num_eval_episodes)
         all_results.append((global_step, metrics))
- 
+
         # Print immediately so progress is visible in the cluster log
         if modality == "actions":
             _print_modality("action_recon_loss", metrics["actions"])
@@ -198,11 +214,11 @@ def main(cfg):
             _print_modality("action_recon_loss", metrics["actions"])
             _print_modality("state_recon_loss",  metrics["states"])
             print(f"  total_recon_loss = {metrics['total_recon_loss']:.6f}")
- 
-    # W&B logging 
+
+    # W&B logging
     if not cfg.use_wandb:
         return
- 
+
     if modality in ("actions", "both"):
         run = _init_wandb_run(WANDB_PROJECTS["actions"], exp_name, cfg)
         for global_step, metrics in all_results:
@@ -211,7 +227,7 @@ def main(cfg):
                 run.log({"eval/total_recon_loss": metrics["total_recon_loss"]},
                         step=global_step)
         run.finish()
- 
+
     if modality in ("states", "both"):
         run = _init_wandb_run(WANDB_PROJECTS["states"], exp_name, cfg)
         for global_step, metrics in all_results:
@@ -220,7 +236,7 @@ def main(cfg):
                 run.log({"eval/total_recon_loss": metrics["total_recon_loss"]},
                         step=global_step)
         run.finish()
- 
- 
+
+
 if __name__ == "__main__":
     main()

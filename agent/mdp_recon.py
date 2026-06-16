@@ -10,6 +10,14 @@ from agent.mdp import MaskedDPMultimodal
 import utils
 
 
+def _stack_frames(frames: np.ndarray, indices: np.ndarray, k: int) -> np.ndarray:
+    stacked = []
+    for j in range(k):
+        shifted = np.clip(indices - (k - 1 - j), 0, len(frames) - 1)
+        stacked.append(frames[shifted])   # (T, H, W, 3)
+    return np.concatenate(stacked, axis=-1)   # (T, H, W, k*3)
+
+
 class ReconstructionEvalAgent:
     """
     Eval agent that measures reconstruction loss on offline val sequences.
@@ -39,6 +47,14 @@ class ReconstructionEvalAgent:
         Keep the first `split_ratio` fraction of timesteps visible (context);
         mask the remaining (1 - split_ratio) fraction.
         split_ratio must be in (0, 1]
+
+    Observation types
+    -----------------
+    obs_type="states"  : reads episode["observation"] (proprioceptive, float32).
+    obs_type="pixels"  : reads episode["pixel_observation"] for the 9-channel custom
+                         dataset (individual 3-ch frames) and builds frame_stack-deep
+                         stacks on the fly; falls back to episode["observation"] for
+                         VD4RL pixel episodes that were renamed by the loader.
     """
 
     def __init__(
@@ -53,6 +69,8 @@ class ReconstructionEvalAgent:
         path: Optional[str] = None,
         transformer_cfg=None,
         split_ratio: float = 0.5,
+        obs_type: str = "pixels",
+        frame_stack: int = 1,
         **kwargs,
     ):
         self.device = device
@@ -62,6 +80,8 @@ class ReconstructionEvalAgent:
         self.mask_ratio = list(mask_ratio)
         self.modality = modality
         self.split_ratio = split_ratio
+        self.obs_type = obs_type
+        self.frame_stack = frame_stack
 
         assert masking_scheme in ("second_half", "random", "temporal_split"), (
             f"Unknown masking_scheme '{masking_scheme}'. "
@@ -73,6 +93,9 @@ class ReconstructionEvalAgent:
         )
         assert 0.0 < split_ratio <= 1.0, (
             f"split_ratio must be in (0, 1]. Got {split_ratio}."
+        )
+        assert obs_type in ("pixels", "states"), (
+            f"Unknown obs_type '{obs_type}'. Supported: 'pixels', 'states'."
         )
 
         if path is not None:
@@ -111,6 +134,7 @@ class ReconstructionEvalAgent:
             f"T={T} | scheme={masking_scheme}"
             + (f"({scheme_detail})" if scheme_detail else "")
             + f" | modality={modality}"
+            + f" | obs_type={obs_type} frame_stack={frame_stack}"  # NEW
         )
 
 
@@ -410,9 +434,16 @@ class ReconstructionEvalAgent:
         Sample a random window of T timesteps from a val episode.
         """
         episode = random.choice(val_episodes)
-        # episode["observation"] has shape (n_steps + 1, H, W, C)
-        # episode_len = n_observations - 1 (subtract dummy first transition)
-        ep_len = episode["observation"].shape[0] - 1
+
+        if self.obs_type == "pixels":
+            if "pixel_observation" in episode:
+                frames = episode["pixel_observation"]   # (N+1, H, W, 3)
+            else:
+                frames = episode["observation"]         # VD4RL: (N+1, H, W, 3)
+            ep_len = frames.shape[0] - 1
+        else:
+            frames = episode["observation"]             # proprioceptive: (N+1, obs_dim)
+            ep_len = frames.shape[0] - 1
 
         assert ep_len >= self.T, (
             f"Episode length {ep_len} < T={self.T}. "
@@ -420,9 +451,14 @@ class ReconstructionEvalAgent:
         )
 
         idx = np.random.randint(0, ep_len - self.T + 1) + 1
-        states  = episode["observation"][idx - 1 : idx - 1 + self.T]   # (T, H, W, C)
-        actions = episode["action"][idx : idx + self.T]                  # (T, action_dim)
 
+        if self.obs_type == "pixels" and self.frame_stack > 1:
+            abs_indices = np.arange(idx - 1, idx - 1 + self.T)
+            states = _stack_frames(frames, abs_indices, self.frame_stack)  # (T,H,W,k*3)
+        else:
+            states = frames[idx - 1 : idx - 1 + self.T]   # (T,H,W,3) or (T,obs_dim)
+
+        actions = episode["action"][idx : idx + self.T]    # (T, action_dim)
         return states, actions
 
 

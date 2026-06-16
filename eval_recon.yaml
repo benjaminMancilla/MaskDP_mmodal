@@ -26,5 +26,6 @@ eval_snapshots: null
 device: cuda
 use_tb: false
 use_wandb: true
-notes: "reconstruction eval — hierarchical vd4rl"
-exp_name: hier_recon_second_half_T64
+project: maskdp-mm-9ch-recon
+notes: "state+action reconstruction eval — 9ch pixel frame_stack=3"
+exp_name: pixel_9ch_recon_second_half_T64
