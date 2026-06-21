@@ -314,9 +314,9 @@ def main(cfg):
     )
     train_iter = iter(train_loader)
 
-    # Create RETRUN evaluation loader
+    # Create RETURN evaluation loader (disabled by use_return_eval=false for custom dataset runs)
     eval_agent = None
-    if obs_type == "pixels":
+    if obs_type == "pixels" and cfg.get("use_return_eval", True):
         eval_agent = mdp_return_module.MaskingEvalAgentMultimodal(
             obs_shape=env.observation_spec().shape,
             action_shape=env.action_spec().shape,
