@@ -191,8 +191,14 @@ class ReconstructionEvalAgent:
         s_emb_raw = self.mdp._embed_states(states_t)
 
         # State target: L2-normalised CNN features (same as forward_loss normalisation)
-        state_target_t = s_emb_raw / torch.norm(s_emb_raw, dim=-1, keepdim=True)
-        state_target = state_target_t[0].cpu().numpy()  # (T, enc_D)
+        if self.obs_type == "pixels":
+            state_target_t = s_emb_raw / torch.norm(s_emb_raw, dim=-1, keepdim=True)
+            state_target = state_target_t[0].cpu().numpy()  # (T, enc_D)
+        else:
+            # Proprioceptive objective: L2-normalize raw states to match training loss
+            states_t = torch.tensor(states_np, dtype=torch.float32, device=self.device)
+            state_target_t = states_t / (torch.norm(states_t, dim=-1, keepdim=True) + 1e-6)
+            state_target = state_target_t.cpu().numpy()  # (T, obs_dim)
 
         a_emb = self.mdp.action_embed(actions_t)   # (1, T, enc_D)
 
