@@ -1,0 +1,68 @@
+defaults:
+  - agent: mdp_vd4rl
+  - override hydra/launcher: submitit_local
+  - _self_
+
+# task settings
+task: cheetah_run
+discount: 0.99
+
+# train settings
+num_grad_steps: 400010
+log_every_steps: 1000
+action_repeat: 1           # custom maskdp dataset was collected with action_repeat=1
+
+# eval
+eval_every_steps: 25000
+num_eval_episodes: 10
+
+# snapshot
+snapshots: [0, 5000, 10000, 25000, 50000, 75000, 100000, 125000, 150000, 175000, 200000, 250000, 300000, 350000, 400000]
+snapshot_dir: /home/bmancilla/archive/MaskDP/maskdp_snapshots_custom_pixel/
+
+# resume 
+resume: false
+resume_dir: none
+resume_step: 0
+
+use_raw_replay_dir: true
+replay_buffer_dir: /home/bmancilla/archive/MaskDP/maskdp_data/maskdp_train_pixel/cheetah/expert/cheetah_run/train
+replay_buffer_size: 500000
+replay_buffer_num_workers: 8
+batch_size: ${agent.batch_size}
+train_file_split: "all"
+train_ratio: 0.8           # must sum to 1.0 (assertion in OfflineReplayBuffer); unused when file_split="all"
+eval_ratio: 0.1
+bc_ratio: 0.1
+
+# dataset GOAL EVALUATION
+goal_buffer_dir: /home/bmancilla/archive/MaskDP/maskdp_data/maskdp_eval_pixel/expert
+eval_file_split: "all"
+goal_buffer_size: 50000
+goal_buffer_num_workers: 4
+num_goal_eval_episodes: 20
+
+# Pixel Observation
+obs_type: pixels
+pixel_size: 64
+frame_stack: 3             # 3 frames stacked -> 9-ch input (matches pixel_obs_shape: [64,64,9])
+
+# Validation eval
+use_return_eval: false
+eval_T_cond: 32
+eval_T_pred: 32
+eval_replan_freq: 32
+
+# Miscelaneous
+seed: 1
+device: cuda
+save_video: false
+use_tb: true
+use_wandb: true
+project: maskdp-mm-custom-pixel
+notes: "pretrain custom pixel cheetah, action_repeat=1, maskdp dataset"
+exp_name: custom_pixel_placeholder
+
+hydra:
+  run:
+    dir: /home/bmancilla/scratch/maskdp_runs/${now:%Y.%m.%d}/${now:%H%M%S}_${agent.name}_${task}
