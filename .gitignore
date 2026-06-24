@@ -11,3 +11,5 @@ data/
 datasets/
 outputs/
 diagnose_out/
+out/
+diagnostics/
