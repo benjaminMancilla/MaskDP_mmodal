@@ -176,10 +176,18 @@ class OfflineReplayBuffer(IterableDataset):
         # add +1 for the first dummy transition
         idx = np.random.randint(0, episode_len(episode) - self._traj_length + 1) + 1
         if self._obs == "pixels" and self._frame_stack > 1:
+            # Auto-detect pixel key:
+            #   MaskDP custom dataset ("maskdp-pixel") = "pixel_observation"
+            #   V-D4RL dataset                          = "observation"
+            frames = episode.get("pixel_observation", episode["observation"])
             obs_abs      = np.arange(idx - 1, idx - 1 + self._traj_length)
             next_obs_abs = np.arange(idx,     idx     + self._traj_length)
-            obs      = self._stack_pixel_frames(episode["observation"], obs_abs,      self._frame_stack)
-            next_obs = self._stack_pixel_frames(episode["observation"], next_obs_abs, self._frame_stack)
+            obs      = self._stack_pixel_frames(frames, obs_abs,      self._frame_stack)
+            next_obs = self._stack_pixel_frames(frames, next_obs_abs, self._frame_stack)
+        elif self._obs == "pixels":
+            frames = episode.get("pixel_observation", episode["observation"])
+            obs      = frames[idx - 1 : idx - 1 + self._traj_length]
+            next_obs = frames[idx     : idx     + self._traj_length]
         else:
             obs      = episode["observation"][idx - 1 : idx - 1 + self._traj_length]
             next_obs = episode["observation"][idx     : idx     + self._traj_length]
@@ -194,28 +202,61 @@ class OfflineReplayBuffer(IterableDataset):
         # add +1 for the first dummy transition
         start_idx = np.random.randint(0, 900)
         length = np.random.randint(15, 20)
-        start_obs = episode["observation"][start_idx]
+        goal_idx = start_idx + length - 1
+
         start_physics = episode["physics"][start_idx]
-        goal_obs = episode["observation"][start_idx + length - 1]
-        goal_physics = episode["physics"][start_idx + length - 1]
+        goal_physics = episode["physics"][goal_idx]
+        # goal_prop: always proprioceptive (used in L2)
+        goal_obs_prop = episode["observation"][goal_idx]
         timestep = length - 1
-        # print(action.shape)
-        return (start_obs, start_physics, goal_obs, goal_physics, timestep)
+
+        if self._obs == "pixels":
+            frames = episode.get("pixel_observation", episode["observation"])
+            if self._frame_stack > 1:
+                start_obs = self._stack_pixel_frames(
+                    frames, np.array([start_idx]), self._frame_stack
+                )[0]  # (H, W, 3*k)
+                goal_obs = self._stack_pixel_frames(
+                    frames, np.array([goal_idx]), self._frame_stack
+                )[0]  # (H, W, 3*k)
+            else:
+                start_obs = frames[start_idx]
+                goal_obs  = frames[goal_idx]
+        else:
+            start_obs = episode["observation"][start_idx]
+            goal_obs  = goal_obs_prop
+
+        return (start_obs, start_physics, goal_obs, goal_obs_prop, goal_physics, timestep)
 
     def _sample_multiple_goal(self):
         episode = self._sample_episode()
         # add +1 for the first dummy transition
         start_idx = np.random.randint(0, 850)
         time_budget = np.array([12, 24, 36, 48, 60])
+        goal_indices = start_idx + time_budget
 
-        start_obs = episode["observation"][start_idx]
         start_physics = episode["physics"][start_idx]
+        goal_physics = episode["physics"][goal_indices]
+        # goal_prop: always proprioceptive (used in L2)
+        goal_prop = episode["observation"][goal_indices]
 
-        goal = episode["observation"][start_idx + time_budget]
-        goal_physics = episode["physics"][start_idx + time_budget]
+        if self._obs == "pixels":
+            frames = episode.get("pixel_observation", episode["observation"])
+            if self._frame_stack > 1:
+                start_obs = self._stack_pixel_frames(
+                    frames, np.array([start_idx]), self._frame_stack
+                )[0]  # (H, W, 3*k)
+                goal = self._stack_pixel_frames(
+                    frames, goal_indices, self._frame_stack
+                )  # (5, H, W, 3*k)
+            else:
+                start_obs = frames[start_idx]
+                goal      = frames[goal_indices]
+        else:
+            start_obs = episode["observation"][start_idx]
+            goal      = goal_prop
 
-        # print(action.shape)
-        return (start_obs, start_physics, goal, goal_physics, time_budget)
+        return (start_obs, start_physics, goal, goal_prop, goal_physics, time_budget)
 
     def _sample_context(self):
         episode = self._sample_episode()

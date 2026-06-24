@@ -56,7 +56,7 @@ def eval_seq_bc(
     step, episode, total_dist2goal = 0, 0, []
     eval_until_episode = utils.Until(num_eval_episodes)
     batch = next(goal_iter)
-    start_obs, start_physics, goal_obs, goal_physics, timestep = utils.to_torch(
+    start_obs, start_physics, goal_obs, goal_obs_prop, goal_physics, timestep = utils.to_torch(
         batch, device
     )
 
@@ -77,7 +77,7 @@ def eval_seq_bc(
             obs = torch.cat((obs, obs_t.unsqueeze(0)), dim=0)
 
             dist = np.linalg.norm(
-                time_step.observation - goal_obs[episode].cpu().numpy()
+                time_step.observation - goal_obs_prop[episode].cpu().numpy()
             )
             dist2goal = min(dist2goal, dist)
             video_recorder.record(env)
@@ -108,7 +108,7 @@ def eval_bc(
     step, episode, total_dist2goal = 0, 0, []
     eval_until_episode = utils.Until(num_eval_episodes)
     batch = next(goal_iter)
-    start_obs, start_physics, goal_obs, goal_physics, timestep = utils.to_torch(
+    start_obs, start_physics, goal_obs, goal_obs_prop, goal_physics, timestep = utils.to_torch(
         batch, device
     )
 
@@ -127,7 +127,7 @@ def eval_bc(
             obs = np.asarray(time_step.observation)
             obs = torch.as_tensor(obs, device=device)
             dist = np.linalg.norm(
-                time_step.observation - goal_obs[episode].cpu().numpy()
+                time_step.observation - goal_obs_prop[episode].cpu().numpy()
             )
             dist2goal = min(dist2goal, dist)
             video_recorder.record(env)
@@ -159,7 +159,7 @@ def eval_mdp(
     step, episode, total_dist2goal = 0, 0, []
     eval_until_episode = utils.Until(num_eval_episodes)
     batch = next(goal_iter)
-    start_obs, start_physics, goal_obs, goal_physics, timestep = utils.to_torch(
+    start_obs, start_physics, goal_obs, goal_obs_prop, goal_physics, timestep = utils.to_torch(
         batch, device
     )
 
@@ -182,7 +182,7 @@ def eval_mdp(
                 video_recorder.record(env)
                 step += 1
                 dist = np.linalg.norm(
-                    time_step.observation - goal_obs[episode].cpu().numpy()
+                    time_step.observation - goal_obs_prop[episode].cpu().numpy()
                 )
                 dist2goal = min(dist2goal, dist)
 
@@ -203,7 +203,7 @@ def eval_mdp(
                 obs = np.asarray(time_step.observation)
                 obs = torch.as_tensor(obs, device=device)
                 dist = np.linalg.norm(
-                    time_step.observation - goal_obs[episode].cpu().numpy()
+                    time_step.observation - goal_obs_prop[episode].cpu().numpy()
                 )
                 dist2goal = min(dist2goal, dist)
                 video_recorder.record(env)

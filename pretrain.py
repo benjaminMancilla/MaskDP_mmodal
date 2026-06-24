@@ -73,7 +73,7 @@ def eval_goal_reaching(global_step, goal_agent, env, logger,
     step, episode, total_dist2goal = 0, 0, []
     eval_until_episode = utils.Until(num_eval_episodes)
     batch = next(goal_iter)
-    start_obs, start_physics, goal_obs, goal_physics, timestep = utils.to_torch(
+    start_obs, start_physics, goal_obs, goal_obs_prop, goal_physics, timestep = utils.to_torch(
         batch, device
     )
     while eval_until_episode(episode):
@@ -94,7 +94,7 @@ def eval_goal_reaching(global_step, goal_agent, env, logger,
                 time_step = env.step(a)
                 step += 1
                 dist = np.linalg.norm(
-                    time_step.observation - goal_obs[episode].cpu().numpy()
+                    time_step.physics - goal_physics[episode].cpu().numpy()
                 )
                 dist2goal = min(dist2goal, dist)
         else:
@@ -108,9 +108,11 @@ def eval_goal_reaching(global_step, goal_agent, env, logger,
                     )[0, ...]
                 time_step = env.step(action)
                 obs = np.asarray(time_step.observation)
+                if obs.ndim == 3:
+                    obs = obs.transpose(1, 2, 0)
                 obs = torch.as_tensor(obs, device=device)
                 dist = np.linalg.norm(
-                    time_step.observation - goal_obs[episode].cpu().numpy()
+                    time_step.physics - goal_physics[episode].cpu().numpy()
                 )
                 dist2goal = min(dist2goal, dist)
                 step += 1
@@ -208,8 +210,9 @@ def main(cfg):
     train_iter = iter(train_loader)
 
 
+    # Return evaluation loader (disabled via use_return_eval=false, ej. dataset custom pixel)
     eval_agent = None
-    if cfg.get("obs_type", "states") == "pixels":
+    if cfg.get("obs_type", "states") == "pixels" and cfg.get("use_return_eval", True):
         eval_agent = mdp_return_module.MaskingEvalAgent(
             obs_shape=env.observation_spec().shape,
             action_shape=env.action_spec().shape,
@@ -239,6 +242,8 @@ def main(cfg):
                 mode="goal",
                 cfg=cfg.agent.transformer_cfg,
                 relabel=False,
+                obs=obs_type,
+                frame_stack=_frame_stack,
             )
             goal_iter = iter(goal_loader)
 

@@ -56,7 +56,7 @@ def eval_seq_bc(
     step, episode, total_dist2goal = 0, 0, []
     eval_until_episode = utils.Until(num_eval_episodes)
     batch = next(goal_iter)
-    start_obs, start_physics, goal, goal_physics, time_budget = utils.to_torch(
+    start_obs, start_physics, goal, goal_prop, goal_physics, time_budget = utils.to_torch(
         batch, device
     )
 
@@ -72,7 +72,8 @@ def eval_seq_bc(
             dist2goal = 1e6
             if obs.shape[0] > 1:
                 obs = obs[-1].unsqueeze(0)
-            current_goal = goal[episode, i]
+            current_goal      = goal[episode, i]
+            current_goal_prop = goal_prop[episode, i]
             if i == 0:
                 current_budget = epi_budget[i] + 2
             else:
@@ -86,7 +87,7 @@ def eval_seq_bc(
                 obs = torch.cat((obs, obs_t.unsqueeze(0)), dim=0)
 
                 dist = np.linalg.norm(
-                    time_step.observation - current_goal.cpu().numpy()
+                    time_step.observation - current_goal_prop.cpu().numpy()
                 )
                 dist2goal = min(dist2goal, dist)
                 video_recorder.record(env)
@@ -120,7 +121,7 @@ def eval_bc(
     step, episode, total_dist2goal = 0, 0, []
     eval_until_episode = utils.Until(num_eval_episodes)
     batch = next(goal_iter)
-    start_obs, start_physics, goal, goal_physics, time_budget = utils.to_torch(
+    start_obs, start_physics, goal, goal_prop, goal_physics, time_budget = utils.to_torch(
         batch, device
     )
 
@@ -134,7 +135,8 @@ def eval_bc(
         episode_dist = []
         for i in range(epi_budget.shape[0]):
             dist2goal = 1e6
-            current_goal = goal[episode, i]
+            current_goal      = goal[episode, i]
+            current_goal_prop = goal_prop[episode, i]
             if i == 0:
                 current_budget = epi_budget[i] + 2
             else:
@@ -146,7 +148,7 @@ def eval_bc(
                 obs = np.asarray(time_step.observation)
                 obs = torch.as_tensor(obs, device=device)
                 dist = np.linalg.norm(
-                    time_step.observation - current_goal.cpu().numpy()
+                    time_step.observation - current_goal_prop.cpu().numpy()
                 )
                 dist2goal = min(dist2goal, dist)
                 video_recorder.record(env)
@@ -181,7 +183,7 @@ def eval_mdp(
     step, episode, total_dist2goal = 0, 0, []
     eval_until_episode = utils.Until(num_eval_episodes)
     batch = next(goal_iter)
-    start_obs, start_physics, goal, goal_physics, time_budget = utils.to_torch(
+    start_obs, start_physics, goal, goal_prop, goal_physics, time_budget = utils.to_torch(
         batch, device
     )
 
@@ -208,7 +210,7 @@ def eval_mdp(
 
             for i in range(len(episode_budget)):
                 dist2goal = 1e5
-                current_goal = goal[episode, i]
+                current_goal = goal_prop[episode, i]
                 for t in range(len(states)):
                     dist = np.linalg.norm(states[t] - current_goal.cpu().numpy())
                     dist2goal = min(dist2goal, dist)
@@ -246,7 +248,7 @@ def eval_mdp(
 
             for i in range(len(episode_budget)):
                 dist2goal = 1e5
-                current_goal = goal[episode, i]
+                current_goal = goal_prop[episode, i]
                 for t in range(len(states)):
                     dist = np.linalg.norm(states[t] - current_goal.cpu().numpy())
                     dist2goal = min(dist2goal, dist)

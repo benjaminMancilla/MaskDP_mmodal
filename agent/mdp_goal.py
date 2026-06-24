@@ -108,8 +108,8 @@ class MDPGoalAgent:
             decoder_pos_embed = self.mdp.decoder_pos_embed
             attn_mask = self.mdp.attn_mask
 
-        s_emb = self.mdp.state_embed(obs) + pos_embed[:, 0]
-        g_emb = self.mdp.state_embed(goal) + pos_embed[:, time_budgets * 2]
+        s_emb = self.mdp._embed_states(obs) + pos_embed[:, 0]
+        g_emb = self.mdp._embed_states(goal) + pos_embed[:, time_budgets * 2]
         # encoder
         x = torch.cat([s_emb, g_emb], dim=1)
         for blk in self.mdp.encoder_blocks:
@@ -155,8 +155,8 @@ class MDPGoalAgent:
             decoder_pos_embed = self.mdp.decoder_pos_embed
             attn_mask = self.mdp.attn_mask
 
-        s_emb = self.mdp.state_embed(obs) + pos_embed[:, 0]
-        g_emb = self.mdp.state_embed(goal) + pos_embed[:, 2 * T]
+        s_emb = self.mdp._embed_states(obs) + pos_embed[:, 0]
+        g_emb = self.mdp._embed_states(goal) + pos_embed[:, 2 * T]
         # encoder
         x = torch.cat([s_emb, g_emb], dim=1)
         for blk in self.mdp.encoder_blocks:
