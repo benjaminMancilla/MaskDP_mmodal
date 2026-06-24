@@ -94,7 +94,8 @@ def main(cfg):
     obs_type   = cfg.get("obs_type", "pixels")
     pixel_size = cfg.get("pixel_size", 64)
     env = dmc.make(cfg.task, seed=cfg.seed, obs_type=obs_type,
-               pixel_size=pixel_size, action_repeat=cfg.get("action_repeat", 2))
+               pixel_size=pixel_size, action_repeat=cfg.get("action_repeat", 2),
+               frame_stack=cfg.get("frame_stack", 1))
 
     # Agent (built once, weights are swapped per snapshot inside the loop)
     agent = hydra.utils.instantiate(

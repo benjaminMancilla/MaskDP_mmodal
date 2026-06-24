@@ -77,6 +77,7 @@ class OfflineReplayBuffer(IterableDataset):
         train_ratio=0.8,
         eval_ratio=0.1,
         bc_ratio=0.1,
+        frame_stack: int = 1,
     ):
         self._env = env
         self._replay_dir = replay_dir
@@ -93,6 +94,7 @@ class OfflineReplayBuffer(IterableDataset):
         self._cfg = cfg
         self._relabel = relabel
         self._obs = obs
+        self._frame_stack = frame_stack
         assert abs(train_ratio + eval_ratio + bc_ratio - 1.0) < 1e-6
         self._file_split = file_split
         self._train_ratio = train_ratio
@@ -141,6 +143,23 @@ class OfflineReplayBuffer(IterableDataset):
             self._episode_fns.append(eps_fn)
             self._episodes[eps_fn] = episode
             self._size += episode_len(episode)
+            
+    def _stack_pixel_frames(self, frames, indices, k):
+        """
+        Build a frame-stacked observation for each requested token.
+
+        Args:
+            frames:  (N_ep, H, W, 3) uint8 — full episode pixel observations.
+            indices: 1-D int array of absolute episode indices (0-indexed).
+            k:       number of frames to stack (oldest → newest).
+        """
+        # j=0 oldest frame, j=k-1 newest frame
+        idxs = np.stack(
+            [np.clip(indices - (k - 1 - j), 0, None) for j in range(k)],
+            axis=1,
+        )  # (n, k)
+        stacked = frames[idxs]  # (n, k, H, W, 3)
+        return np.concatenate([stacked[:, j] for j in range(k)], axis=-1)  # (n, H, W, k*3)
 
     def _sample_episode(self):
         if not self._loaded:
@@ -156,9 +175,15 @@ class OfflineReplayBuffer(IterableDataset):
         episode = self._sample_episode()
         # add +1 for the first dummy transition
         idx = np.random.randint(0, episode_len(episode) - self._traj_length + 1) + 1
-        obs = episode["observation"][idx - 1 : idx - 1 + self._traj_length]
+        if self._obs == "pixels" and self._frame_stack > 1:
+            obs_abs      = np.arange(idx - 1, idx - 1 + self._traj_length)
+            next_obs_abs = np.arange(idx,     idx     + self._traj_length)
+            obs      = self._stack_pixel_frames(episode["observation"], obs_abs,      self._frame_stack)
+            next_obs = self._stack_pixel_frames(episode["observation"], next_obs_abs, self._frame_stack)
+        else:
+            obs      = episode["observation"][idx - 1 : idx - 1 + self._traj_length]
+            next_obs = episode["observation"][idx     : idx     + self._traj_length]
         action = episode["action"][idx : idx + self._traj_length]
-        next_obs = episode["observation"][idx : idx + self._traj_length]
         reward = episode["reward"][idx : idx + self._traj_length]
         discount = episode["discount"][idx : idx + self._traj_length] * self._discount
         timestep = np.arange(idx - 1, idx + self._traj_length - 1)[:, np.newaxis]
@@ -248,6 +273,7 @@ def make_replay_loader(
     train_ratio=0.8,
     eval_ratio=0.1,
     bc_ratio=0.1,
+    frame_stack: int = 1,
 ):
     max_size_per_worker = max_size // max(1, num_workers)
 
@@ -267,6 +293,7 @@ def make_replay_loader(
         train_ratio=train_ratio,
         eval_ratio=eval_ratio,
         bc_ratio=bc_ratio,
+        frame_stack=frame_stack,
     )
 
     loader = torch.utils.data.DataLoader(

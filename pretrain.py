@@ -136,7 +136,9 @@ def main(cfg):
     # create envs
     obs_type   = cfg.get("obs_type", "states")
     pixel_size = cfg.get("pixel_size", 84)
-    env = dmc.make(cfg.task, seed=cfg.seed, obs_type=obs_type, pixel_size=pixel_size)
+    _frame_stack = cfg.get("frame_stack", 1)
+    env = dmc.make(cfg.task, seed=cfg.seed, obs_type=obs_type, pixel_size=pixel_size,
+                frame_stack=_frame_stack)
 
     # create agent
     agent = hydra.utils.instantiate(
@@ -196,6 +198,8 @@ def main(cfg):
         domain,
         cfg.agent.transformer_cfg.traj_length,
         relabel=False,
+        obs=obs_type,
+        frame_stack=_frame_stack,
         file_split=cfg.get("train_file_split", "all"),
         train_ratio=cfg.get("train_ratio", 0.8),
         eval_ratio=cfg.get("eval_ratio", 0.1),
@@ -207,7 +211,7 @@ def main(cfg):
     eval_agent = None
     if cfg.get("obs_type", "states") == "pixels":
         eval_agent = mdp_return_module.MaskingEvalAgent(
-            obs_shape=(pixel_size, pixel_size, 3),
+            obs_shape=env.observation_spec().shape,
             action_shape=env.action_spec().shape,
             device=device,
             T_cond=cfg.get("eval_T_cond", 32),

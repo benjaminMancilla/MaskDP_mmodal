@@ -7,7 +7,7 @@ task: cheetah_run
 discount: 0.99
 obs_type: pixels
 pixel_size: 64
-
+frame_stack: 1
 action_repeat: 2
 
 # eval

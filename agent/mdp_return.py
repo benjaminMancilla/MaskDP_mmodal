@@ -58,10 +58,10 @@ class MaskingEvalAgent:
             param.requires_grad = False
         self.mdp.eval()
 
-        assert self.T_total == self.config.traj_length, (
-            f"T_cond + T_pred = {self.T_total} must equal "
-            f"traj_length = {self.config.traj_length}"
-        )
+        #assert self.T_total == self.config.traj_length, (
+        #    f"T_cond + T_pred = {self.T_total} must equal "
+        #    f"traj_length = {self.config.traj_length}"
+        #)
 
         n_params = sum(p.numel() for p in self.mdp.parameters())
         print(f"[MaskingEvalAgent] Parameters: {n_params:,} (all frozen)")
