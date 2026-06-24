@@ -1,0 +1,33 @@
+defaults:
+  - agent: mdp_return
+  - override hydra/launcher: submitit_local
+  - _self_
+
+# task
+task: cheetah_run
+discount: 0.99
+action_repeat: 1
+
+# eval
+num_eval_episodes: 10
+
+# multiple snapshots to eval in one run (optional, overrides agent.path)
+# eval_snapshots:
+#   - /path/to/snapshot_100000.pt
+#   - /path/to/snapshot_200000.pt
+
+# misc
+seed: 1
+device: cuda
+use_tb: true
+use_wandb: true
+project: maskdp-mm-return-eval
+notes: "masking BC eval — hierarchical proprioceptivo"
+exp_name: hier_masking_eval_Tcond16_Tpred48
+
+# W&B resume support (optional)
+wandb_run_id: null
+
+hydra:
+  run:
+    dir: /home/bmancilla/scratch/maskdp_eval/${task}/seed_${seed}/${now:%Y.%m.%d}/${now:%H%M%S}_${agent.name}

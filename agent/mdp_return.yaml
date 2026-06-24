@@ -1,0 +1,14 @@
+# @package agent
+_target_: agent.mdp_return.MaskingEvalAgentMultimodal
+name: mdp_return
+obs_shape: ??? # to be specified later
+action_shape: ??? # to be specified later
+device: ${device}
+
+# Warmup/eval protocol (ver docstring de MaskingEvalAgentMultimodal)
+T_cond: 16
+T_pred: 48
+replan_freq: 48   # T_pred = open-loop (sin replanning) | 1 = full closed-loop
+
+# Snapshot
+path: null
