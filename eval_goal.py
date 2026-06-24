@@ -182,7 +182,7 @@ def eval_mdp(
                 video_recorder.record(env)
                 step += 1
                 dist = np.linalg.norm(
-                    time_step.observation - goal_obs_prop[episode].cpu().numpy()
+                    time_step.physics - goal_physics[episode].cpu().numpy()
                 )
                 dist2goal = min(dist2goal, dist)
 
@@ -201,9 +201,11 @@ def eval_mdp(
                     )[0, ...]
                 time_step = env.step(action)
                 obs = np.asarray(time_step.observation)
+                if obs.ndim == 3:
+                    obs = obs.transpose(1, 2, 0)
                 obs = torch.as_tensor(obs, device=device)
                 dist = np.linalg.norm(
-                    time_step.observation - goal_obs_prop[episode].cpu().numpy()
+                    time_step.physics - goal_physics[episode].cpu().numpy()
                 )
                 dist2goal = min(dist2goal, dist)
                 video_recorder.record(env)
@@ -230,7 +232,11 @@ def main(cfg):
     device = torch.device(cfg.device)
 
     # create envs
-    env = dmc.make(cfg.task, seed=cfg.seed)
+    obs_type     = cfg.get("obs_type", "states")
+    pixel_size   = cfg.get("pixel_size", 64)
+    _frame_stack = cfg.get("frame_stack", 1)
+    env = dmc.make(cfg.task, seed=cfg.seed, obs_type=obs_type, pixel_size=pixel_size,
+                   action_repeat=cfg.get("action_repeat", 2), frame_stack=_frame_stack)
 
     # create agent
     path = get_dir(cfg)
@@ -300,6 +306,8 @@ def main(cfg):
         mode="goal",
         cfg=agent.config,
         relabel=False,
+        obs=obs_type,
+        frame_stack=_frame_stack,
     )
     goal_iter = iter(goal_loader)
 

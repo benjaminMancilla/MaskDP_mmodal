@@ -6,6 +6,10 @@ defaults:
 # task settings
 task: cheetah_run
 discount: 0.99
+obs_type: states
+pixel_size: 64
+frame_stack: 1
+action_repeat: 2
 #eval
 num_eval_episodes: 100
 eval_every_steps: 10000
