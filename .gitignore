@@ -10,3 +10,5 @@ slurm/
 data/
 datasets/
 outputs/
+diagnostics/
+out/
