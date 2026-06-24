@@ -1,0 +1,31 @@
+defaults:
+  - agent: mdp_recon
+  - _self_
+
+# task settings
+task: cheetah_run
+obs_type: pixels
+pixel_size: 64
+
+# eval
+num_eval_episodes: 100
+
+# Global seed
+seed: 1
+
+# Dataset
+val_replay_dir: /home/bmancilla/archive/MaskDP/v_d4rl_data/main/cheetah_run/expert/64px
+
+# Fraction of files used for validation
+val_split_ratio: 0.2
+
+# Snapshots
+eval_snapshots: null
+
+# Misc
+device: cuda
+use_tb: false
+use_wandb: true
+project: maskdp-mm-9ch-recon
+notes: "state+action reconstruction eval (paper, unimodal) — 9ch pixel frame_stack=3"
+exp_name: paper_9ch_recon_second_half_T64
