@@ -175,31 +175,67 @@ class OfflineReplayBuffer(IterableDataset):
 
     def _sample(self):
         episode = self._sample_episode()
-        # add +1 for the first dummy transition
-        idx = np.random.randint(0, episode_len(episode) - self._traj_length + 1) + 1
+        L = episode_len(episode)
 
-        if self._obs == "pixels":
-            # Auto-detect pixel key:
-            #   MaskDP custom dataset = "pixel_observation" (proprioceptive in "observation")
-            #   V-D4RL dataset        = "observation" (no separate pixel_observation key)
-            frames = episode.get("pixel_observation", episode["observation"])
-            if self._frame_stack > 1:
-                obs_abs      = np.arange(idx - 1, idx - 1 + self._traj_length)
-                next_obs_abs = np.arange(idx,     idx     + self._traj_length)
-                obs      = self._stack_pixel_frames(frames, obs_abs,      self._frame_stack)
-                next_obs = self._stack_pixel_frames(frames, next_obs_abs, self._frame_stack)
+        if L >= self._traj_length:
+            # add +1 for the first dummy transition
+            idx = np.random.randint(0, L - self._traj_length + 1) + 1
+
+            if self._obs == "pixels":
+                frames = episode.get("pixel_observation", episode["observation"])
+                if self._frame_stack > 1:
+                    obs_abs      = np.arange(idx - 1, idx - 1 + self._traj_length)
+                    next_obs_abs = np.arange(idx,     idx     + self._traj_length)
+                    obs      = self._stack_pixel_frames(frames, obs_abs,      self._frame_stack)
+                    next_obs = self._stack_pixel_frames(frames, next_obs_abs, self._frame_stack)
+                else:
+                    obs      = frames[idx - 1 : idx - 1 + self._traj_length]
+                    next_obs = frames[idx     : idx     + self._traj_length]
             else:
-                obs      = frames[idx - 1 : idx - 1 + self._traj_length]
-                next_obs = frames[idx     : idx     + self._traj_length]
-        else:
-            obs      = episode["observation"][idx - 1 : idx - 1 + self._traj_length]
-            next_obs = episode["observation"][idx     : idx     + self._traj_length]
+                obs      = episode["observation"][idx - 1 : idx - 1 + self._traj_length]
+                next_obs = episode["observation"][idx     : idx     + self._traj_length]
 
-        action   = episode["action"][idx : idx + self._traj_length]
-        reward   = episode["reward"][idx : idx + self._traj_length]
-        discount = episode["discount"][idx : idx + self._traj_length] * self._discount
-        timestep = np.arange(idx - 1, idx + self._traj_length - 1)[:, np.newaxis]
-        return (obs, action, reward, discount, next_obs, 0)
+            action   = episode["action"][idx : idx + self._traj_length]
+            reward   = episode["reward"][idx : idx + self._traj_length]
+            discount = episode["discount"][idx : idx + self._traj_length] * self._discount
+            mask     = np.ones((self._traj_length, 1), dtype=np.float32)
+            return (obs, action, reward, discount, next_obs, mask)
+
+        # frame_stack > 1 not supported, V-D4RL always is L >= self._traj_length
+        if self._frame_stack > 1:
+            raise NotImplementedError(
+                f"Short Episode (L={L} < traj_length={self._traj_length}) with "
+                f"frame_stack={self._frame_stack} > 1"
+            )
+
+        # Apply padding of 0 + mask for the missing timesteps
+        idx = 1
+        pad = self._traj_length - L
+
+        frames = episode.get("pixel_observation", episode["observation"]) if self._obs == "pixels" \
+            else episode["observation"]
+
+        obs_real      = frames[idx - 1 : idx - 1 + L]
+        next_obs_real = frames[idx     : idx     + L]
+        action_real   = episode["action"][idx : idx + L]
+        reward_real   = episode["reward"][idx : idx + L]
+        discount_real = episode["discount"][idx : idx + L] * self._discount
+
+        def _pad_zeros(arr, n_pad):
+            pad_shape = (n_pad,) + arr.shape[1:]
+            return np.concatenate([arr, np.zeros(pad_shape, dtype=arr.dtype)], axis=0)
+
+        obs      = _pad_zeros(obs_real, pad)
+        next_obs = _pad_zeros(next_obs_real, pad)
+        action   = _pad_zeros(action_real, pad)
+        reward   = _pad_zeros(reward_real, pad)
+        discount = _pad_zeros(discount_real, pad)
+
+        mask = np.zeros((self._traj_length, 1), dtype=np.float32)
+        mask[:L] = 1.0
+
+        return (obs, action, reward, discount, next_obs, mask)
+
 
     def _sample_goal(self):
         episode = self._sample_episode()
@@ -232,7 +268,6 @@ class OfflineReplayBuffer(IterableDataset):
             start_obs = episode["observation"][start_idx]
             goal_obs  = goal_obs_prop  # same array in state mode
 
-        # 6-tuple: callers use goal_obs_prop (prop) for L2, goal_obs for model input
         return (start_obs, start_physics, goal_obs, goal_obs_prop, goal_physics, timestep)
 
     def _sample_multiple_goal(self):
@@ -265,7 +300,6 @@ class OfflineReplayBuffer(IterableDataset):
             start_obs = episode["observation"][start_idx]
             goal      = goal_prop  # same array in state mode
 
-        # 6-tuple: callers use goal_prop (prop) for L2, goal for model input
         return (start_obs, start_physics, goal, goal_prop, goal_physics, time_budget)
 
     def _sample_context(self):
