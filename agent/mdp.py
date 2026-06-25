@@ -539,7 +539,7 @@ class MaskedDPMultimodal(nn.Module):
 
         return self.traj_lengths[-1]  # fallback
 
-    def forward_encoder(self, states, actions, mask_ratio):
+    def forward_encoder(self, states, actions, mask_ratio, valid_mask=None):
         """MAE-style encoder with separate state and action streams."""
 
         # Input sanitization according to training mode
@@ -606,7 +606,14 @@ class MaskedDPMultimodal(nn.Module):
             _, top_a_idx = torch.topk(torch.rand(batch_size, T, device=states.device), k_a, dim=1)
             top_a_idx_interleaved = top_a_idx * 2 + 1
             noise.scatter_(1, top_a_idx_interleaved, -100.0)
-        
+
+        if valid_mask is not None:
+            v = valid_mask.to(device=states.device, dtype=torch.bool)
+            if v.dim() == 3 and v.size(-1) == 1:
+                v = v.squeeze(-1)                                   # [B, T, 1] -> [B, T]
+            invalid_interleaved = (~v).repeat_interleave(2, dim=1)  # [B, 2T], s_t/a_t share validity
+            noise = noise.masked_fill(invalid_interleaved, 1.0e4)
+
         # Apply masking on the full interleaved sequence
         x_masked, mask, ids_restore, ids_keep = self.random_masking(x, mask_ratio, noise=noise)
 
@@ -760,7 +767,7 @@ class MaskedDPMultimodal(nn.Module):
         
         return s_pred, a_pred
 
-    def forward_loss(self, target_s, target_a, pred_s, pred_a, mask):
+    def forward_loss(self, target_s, target_a, pred_s, pred_a, mask, valid_mask=None):
         batch_size, T, _ = target_s.size()
 
         with torch.no_grad():
@@ -769,7 +776,8 @@ class MaskedDPMultimodal(nn.Module):
         
         # State normalization
         if self.norm == "l2":
-            target_s = target_s / torch.norm(target_s, dim=-1, keepdim=True)
+            # clamp avoids 0/0 -> NaN when target_s is an exact-zero embedding
+            target_s = target_s / torch.norm(target_s, dim=-1, keepdim=True).clamp(min=1.0e-6)
         elif self.norm == "mae":
             mean = target_s.mean(dim=-1, keepdim=True)
             var = target_s.var(dim=-1, keepdim=True)
@@ -799,6 +807,15 @@ class MaskedDPMultimodal(nn.Module):
         elif self.train_mode == 'action_only':
             loss_s_t = torch.zeros_like(loss_s_t)
 
+        if valid_mask is not None:
+            v_t = valid_mask.to(device=loss_s_t.device, dtype=loss_s_t.dtype)
+            if v_t.dim() == 3 and v_t.size(-1) == 1:
+                v_t = v_t.squeeze(-1)                  # [B, T, 1] -> [B, T]
+            loss_s_t = loss_s_t * v_t
+            loss_a_t = loss_a_t * v_t
+        else:
+            v_t = torch.ones_like(loss_s_t)
+
         # Intercalate [s0,a0,s1,a1,...] -> shape [B, 2T]
         # action_loss_weight is applied only for total/masked loss
         loss_tokens = torch.stack(
@@ -806,12 +823,13 @@ class MaskedDPMultimodal(nn.Module):
         )  # [B, T, 2]
         loss_tokens = loss_tokens.reshape(batch_size, 2 * T)     # [B, 2T]
 
-        # Only ONE masked_loss for both modalities (same idea than the original)
-        masked_loss = (loss_tokens * mask).sum() / mask.sum()
+        v_interleaved = v_t.repeat_interleave(2, dim=1)               # [B, 2T]
+        combined_weight = mask * v_interleaved
+        masked_loss = (loss_tokens * combined_weight).sum() / combined_weight.sum().clamp(min=1.0e-8)
 
-        # Per-modality average losses is raw
-        state_loss = loss_s_t.mean()
-        action_loss = loss_a_t.mean()
+        denom = v_t.sum().clamp(min=1.0e-8)
+        state_loss = loss_s_t.sum() / denom
+        action_loss = loss_a_t.sum() / denom
 
         return masked_loss, state_loss, action_loss
 
@@ -1013,7 +1031,12 @@ class MaskedDPMultimodalAgent:
         self.training = training
         self.model.train(training)
 
-    def update_mdp(self, states, actions, step=None):
+    def update_mdp(self, states, actions, step=None, valid_mask=None):
+        """
+        valid_mask: optional [B,T] or [B,T,1] tensor, 1=real timestep, 0=padding
+        (e.g. from OfflineReplayBuffer when an episode is shorter than
+        traj_length). Default None means "all real" - exact original behavior.
+        """
         self.check_freeze_schedule(step)
         
         # Warmup Logic
@@ -1054,10 +1077,12 @@ class MaskedDPMultimodalAgent:
             T_eff = self.model._sample_jitter_T()
             states  = states[:, :T_eff]
             actions = actions[:, :T_eff]
+            if valid_mask is not None:
+                valid_mask = valid_mask[:, :T_eff]
 
         # Encoder (dual + optional fusion)
         x_fused, mask, ids_restore, ids_keep = \
-            self.model.forward_encoder(states, actions, mask_ratio)
+            self.model.forward_encoder(states, actions, mask_ratio, valid_mask=valid_mask)
         
         # Decoder
         pred_s, pred_a = self.model.forward_decoder(
@@ -1079,7 +1104,7 @@ class MaskedDPMultimodalAgent:
             print(f"[DEBUG step={step}] embedding norm: {norms.mean():.4f} ± {norms.std():.4f} | inter-frame cosine sim: {sim:.4f}")
         
         mask_loss, state_loss, action_loss = self.model.forward_loss(
-            target_s, actions, pred_s, pred_a, mask
+            target_s, actions, pred_s, pred_a, mask, valid_mask=valid_mask
         )
         
         if self.config.loss == "masked":
@@ -1104,11 +1129,11 @@ class MaskedDPMultimodalAgent:
     def eval_validation(self, val_iter, step=None):
         metrics = dict()
         batch = next(val_iter)
-        obs, action, _, _, _, _ = utils.to_torch(batch, self.device)
+        obs, action, _, _, _, valid_mask = utils.to_torch(batch, self.device)
         
         mask_ratio = np.random.choice(self.mask_ratio)
         x_fused, mask, ids_restore, ids_keep = \
-            self.model.forward_encoder(obs, action, mask_ratio)
+            self.model.forward_encoder(obs, action, mask_ratio, valid_mask=valid_mask)
         
         pred_s, pred_a = self.model.forward_decoder(
             x_fused, ids_restore
@@ -1121,7 +1146,7 @@ class MaskedDPMultimodalAgent:
             target_s = self.model._embed_states(obs)
 
         mask_loss, state_loss, action_loss = self.model.forward_loss(
-            target_s, action, pred_s, pred_a, mask
+            target_s, action, pred_s, pred_a, mask, valid_mask=valid_mask
         )
 
         if self.use_tb:
@@ -1135,9 +1160,9 @@ class MaskedDPMultimodalAgent:
         metrics = dict()
 
         batch = next(replay_iter)
-        obs, action, _, _, _, _ = utils.to_torch(batch, self.device)
+        obs, action, _, _, _, valid_mask = utils.to_torch(batch, self.device)
 
         # update critic
-        metrics.update(self.update_mdp(obs, action, step=step))
+        metrics.update(self.update_mdp(obs, action, step=step, valid_mask=valid_mask))
 
         return metrics
