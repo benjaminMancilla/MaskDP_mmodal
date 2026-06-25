@@ -12,7 +12,7 @@ from dm_control.utils import rewards
 from einops import rearrange, reduce, repeat
 from agent.modules.attention import Block, CausalSelfAttention, CoAttentionBlock, ParallelCoAttentionBlock, AdapterMLP, CoAttentionBlockSharedMLP
 from agent.modules.pixel_encoder import PixelEncoder
-from agent.modules.load_pretrained_encoder import load_drqbc_convnet
+from agent.modules.load_pretrained_encoder import load_drqbc_convnet, load_procgen_impala
 
 
 class MaskedDPMultimodal(nn.Module):
@@ -85,7 +85,20 @@ class MaskedDPMultimodal(nn.Module):
 
             pretrained_path = getattr(config, "pretrained_encoder_path", None)
             if pretrained_path is not None:
-                load_drqbc_convnet(self.pixel_encoder, pretrained_path, freeze=True)
+                # Dispatch by encoder_type: each pretrained checkpoint format
+                # (DrQ-v2 convnet-only vs. Procgen IMPALA convnet+projection)
+                if pixel_encoder_type == "drqv2":
+                    load_drqbc_convnet(self.pixel_encoder, pretrained_path, freeze=True)
+                elif pixel_encoder_type == "procgen_impala":
+                    load_procgen_impala(self.pixel_encoder, pretrained_path, freeze=True)
+                else:
+                    raise ValueError(
+                        f"No pretrained-weights loader registered for "
+                        f"pixel_encoder_type='{pixel_encoder_type}'. "
+                        f"Either add one in load_pretrained_encoder.py and dispatch "
+                        f"it here, or omit 'pretrained_encoder_path' to train "
+                        f"'{pixel_encoder_type}' from scratch."
+                    )
 
             self.state_embed = nn.Identity()
             trainable = sum(p.numel() for p in self.pixel_encoder.parameters() if p.requires_grad)
