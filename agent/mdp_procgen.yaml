@@ -21,7 +21,7 @@ transformer_cfg:
                               #   'uniform_log' — weighted sampling with w_i = 1/T_i (favors short T)
   n_embd: 256                 # hidden dim (fusion)
   enc_n_embd: 128             # hidden dim (unimodal encoders)
-  dec_n_embd: 256             # hidden dim (decoders)            
+  dec_n_embd: 256             # hidden dim (decoders)
   n_head: 4                   # attention heads
   n_enc_layer: 2              # encoder layers
   n_dec_layer: 2              # decoder layers
@@ -63,6 +63,12 @@ transformer_cfg:
   pixel_encoder_type: procgen_impala
   freeze_encoder_after: 0
   pretrained_encoder_path: "/home/bmancilla/archive/MaskDP/pretrained_encoders/drqbc_64px_convnet.pt"
+
+  # Discrete Actions
+  discrete_actions: true      # nn.Embedding + cross-entropy instead of nn.Linear + MSE/Tanh
+  num_actions: 15             # action space size (for Procgen is [0,..,14])
+                                
+  action_loss_weight: 1.0     # lambda for balancing MSE(state) vs CE(action) in the total loss.
 
 train_mode: 'joint'           # 'joint' | 'state_only' | 'action_only'
 

@@ -30,6 +30,17 @@ class MaskedDPMultimodal(nn.Module):
         self.obs_dim = obs_dim
         self.action_dim = action_dim
 
+        # Discrete action support (classification instead of regression).
+        self.discrete_actions = bool(getattr(config, "discrete_actions", False))
+        self.num_actions = int(getattr(config, "num_actions", 0))
+        # Lambda to rebalance MSE(state) vs CE(action)
+        self.action_loss_weight = float(getattr(config, "action_loss_weight", 1.0))
+        if self.discrete_actions:
+            assert self.num_actions > 0, "num_actions must be > 0 with discrete_actions=True"
+            print(f"Discrete actions ENABLED: num_actions={self.num_actions}, action_loss_weight={self.action_loss_weight}")
+        else:
+            print(f"Discrete actions DISABLED (continuous action_dim={action_dim})")
+
         # Padding sentinel (used for ragged state/action sequences within a batch)
         # Prefer a value that will never appear in real embedded tokens.
         self.pad_value = float(getattr(config, "pad_value", 1e9))
@@ -108,7 +119,10 @@ class MaskedDPMultimodal(nn.Module):
             self.pixel_encoder = None
             self.state_embed = nn.Linear(obs_dim, self.enc_n_embd)
 
-        self.action_embed = nn.Linear(action_dim, self.enc_n_embd)
+        if self.discrete_actions:
+            self.action_embed = nn.Embedding(self.num_actions, self.enc_n_embd)
+        else:
+            self.action_embed = nn.Linear(action_dim, self.enc_n_embd)
         
         # Modality droupout
         self.modality_dropout = bool(getattr(config, "modality_dropout", True))
@@ -228,12 +242,19 @@ class MaskedDPMultimodal(nn.Module):
             [Block(dec_config) for _ in range(config.n_dec_layer)]
         )
 
-        self.action_head = nn.Sequential(
-            nn.LayerNorm(self.dec_n_embd),
-            nn.ReLU(inplace=True),
-            nn.Linear(self.dec_n_embd, action_dim),
-            nn.Tanh(),
-        )  # decoder to patch
+        if self.discrete_actions:
+            self.action_head = nn.Sequential(
+                nn.LayerNorm(self.dec_n_embd),
+                nn.ReLU(inplace=True),
+                nn.Linear(self.dec_n_embd, self.num_actions),
+            )  # decoder to logits, softmax is applied inside cross_entropy, not here
+        else:
+            self.action_head = nn.Sequential(
+                nn.LayerNorm(self.dec_n_embd),
+                nn.ReLU(inplace=True),
+                nn.Linear(self.dec_n_embd, action_dim),
+                nn.Tanh(),
+            )  # decoder to patch
         self.state_pred_dim = self.enc_n_embd if self.use_pixel_obs else obs_dim
         self.state_head = nn.Sequential(
             nn.LayerNorm(self.dec_n_embd),
@@ -523,7 +544,12 @@ class MaskedDPMultimodal(nn.Module):
 
         # Input sanitization according to training mode
         if self.train_mode == 'state_only':
-            actions = torch.full_like(actions, self.pad_value)
+            if self.discrete_actions:
+                # Safe regardless of value: the action loss for this mode is
+                # zeroed out in forward_loss, so no gradient flows through it.
+                actions = torch.zeros_like(actions)
+            else:
+                actions = torch.full_like(actions, self.pad_value)
         elif self.train_mode == 'action_only':
             states = torch.full_like(states, self.pad_value)
 
@@ -531,7 +557,13 @@ class MaskedDPMultimodal(nn.Module):
         
         # Embeddings
         s_emb = self._embed_states(states)
-        a_emb = self.action_embed(actions)
+        if self.discrete_actions:
+            a_idx = actions.long()
+            if a_idx.dim() == 3 and a_idx.size(-1) == 1:
+                a_idx = a_idx.squeeze(-1)        # [B, T, 1] -> [B, T]
+            a_emb = self.action_embed(a_idx)     # [B, T] -> [B, T, enc_n_embd]
+        else:
+            a_emb = self.action_embed(actions)
         
         # Base:
         """
@@ -659,7 +691,7 @@ class MaskedDPMultimodal(nn.Module):
             ids_restore: [B, total_len] indices to restore original interleaved order
         Returns:
             s_pred: [B, T, obs_dim]
-            a_pred: [B, T, action_dim]
+            a_pred: [B, T, action_dim] (continuous) or [B, T, num_actions] logits (discrete)
         """
         
         batch_size = x_fused.shape[0]
@@ -691,7 +723,8 @@ class MaskedDPMultimodal(nn.Module):
 
             # dummy for actions
             s_pred = self.state_head(x_dec[:, ::2])
-            a_pred = torch.zeros(batch_size, total_len // 2, self.action_dim, device=x.device)
+            a_dim_out = self.num_actions if self.discrete_actions else self.action_dim
+            a_pred = torch.zeros(batch_size, total_len // 2, a_dim_out, device=x.device)
         
         elif self.train_mode == 'action_only':
             a = self.decoder_action_embed(x[:, 1::2])
@@ -742,40 +775,44 @@ class MaskedDPMultimodal(nn.Module):
             var = target_s.var(dim=-1, keepdim=True)
             target_s = (target_s - mean) / (var + 1.0e-6) ** 0.5
 
-        # MSE per dimension
+        # --- State: MSE per dimension -> mean per token ---
         loss_s = (pred_s - target_s) ** 2
-        loss_a = (pred_a - target_a) ** 2
-        
-        if self.train_mode == 'state_only':
-            loss_a = torch.zeros_like(loss_a)
-        elif self.train_mode == 'action_only':
-            loss_s = torch.zeros_like(loss_s)
+        loss_s_t = loss_s.mean(dim=-1)                    # [B, T]
 
-        # Mean MSE per token 
-        loss_s_t = loss_s.mean(dim=-1)
-        loss_a_t = loss_a.mean(dim=-1)
+        # --- Action: MSE per token (continuous) or cross-entropy per token (discrete) ---
+        if self.discrete_actions:
+            A = pred_a.shape[-1]                          # num_actions
+            a_tgt = target_a.long()
+            if a_tgt.dim() == 3 and a_tgt.size(-1) == 1:
+                a_tgt = a_tgt.squeeze(-1)                  # [B, T, 1] -> [B, T]
+            loss_a_t = F.cross_entropy(
+                pred_a.reshape(batch_size * T, A),
+                a_tgt.reshape(batch_size * T),
+                reduction='none',
+            ).reshape(batch_size, T)                       # [B, T] CE per token
+        else:
+            loss_a = (pred_a - target_a) ** 2
+            loss_a_t = loss_a.mean(dim=-1)                 # [B, T]
+
+        if self.train_mode == 'state_only':
+            loss_a_t = torch.zeros_like(loss_a_t)
+        elif self.train_mode == 'action_only':
+            loss_s_t = torch.zeros_like(loss_s_t)
 
         # Intercalate [s0,a0,s1,a1,...] -> shape [B, 2T]
-        loss_tokens = torch.stack([loss_s_t, loss_a_t], dim=-1)  # [B, T, 2]
+        # action_loss_weight is applied only for total/masked loss
+        loss_tokens = torch.stack(
+            [loss_s_t, loss_a_t * self.action_loss_weight], dim=-1
+        )  # [B, T, 2]
         loss_tokens = loss_tokens.reshape(batch_size, 2 * T)     # [B, 2T]
 
         # Only ONE masked_loss for both modalities (same idea than the original)
         masked_loss = (loss_tokens * mask).sum() / mask.sum()
 
-        # Per-modality average losses
-        state_loss = loss_s.mean()
-        action_loss = loss_a.mean()
+        # Per-modality average losses is raw
+        state_loss = loss_s_t.mean()
+        action_loss = loss_a_t.mean()
 
-        if self.train_mode == 'state_only':
-            state_loss = loss_s.mean()
-            action_loss = torch.tensor(0.0, device=target_a.device)
-        elif self.train_mode == 'action_only':
-            state_loss = torch.tensor(0.0, device=target_s.device)
-            action_loss = loss_a.mean()
-        else:
-            state_loss = loss_s.mean()
-            action_loss = loss_a.mean()
-        
         return masked_loss, state_loss, action_loss
 
 
@@ -1048,7 +1085,8 @@ class MaskedDPMultimodalAgent:
         if self.config.loss == "masked":
             loss = mask_loss
         elif self.config.loss == "total":
-            loss = state_loss + action_loss
+            # lamba for balancing total loss
+            loss = state_loss + self.model.action_loss_weight * action_loss
         else:
             raise NotImplementedError
 
