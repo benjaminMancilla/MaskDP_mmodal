@@ -131,6 +131,8 @@ class MaskedDPMultimodal(nn.Module):
         self.p_drop_state = float(getattr(config, "state_dropout_prob", 0.0))
         self.min_keep_states = int(getattr(config, "min_keep_states",  1))
         self.min_keep_actions = int(getattr(config, "min_keep_actions", 0))
+        # Floor on real (non-padding) context tokens
+        self.min_keep_context = int(getattr(config, "min_keep_context", 1))
         if self.modality_dropout:
             print(f"Modality Dropout ENABLED (Global Prob={self.modality_dropout_prob})")
             print(f"Rel. Weights -> Action: {self.p_drop_action}, State: {self.p_drop_state}")
@@ -355,7 +357,7 @@ class MaskedDPMultimodal(nn.Module):
             nn.init.constant_(m.bias, 0)
             nn.init.constant_(m.weight, 1.0)
 
-    def random_masking(self, x, mask_ratio, noise=None):
+    def random_masking(self, x, mask_ratio, noise=None, len_keep=None):
         """
         Perform per-sample random masking by per-sample shuffling.
         Per-sample shuffling is done by argsort random noise.
@@ -365,9 +367,11 @@ class MaskedDPMultimodal(nn.Module):
         to maintain temporal consistency (concatenated sequence)
         
         If noise is provided, use it to bias the sorting order.
+        If len_keep is provided, use it instead of int(L * (1 - mask_ratio))
         """
         N, L, D = x.shape  # batch, length, dim
-        len_keep = int(L * (1 - mask_ratio))
+        if len_keep is None:
+            len_keep = int(L * (1 - mask_ratio))
 
         # noise independent between modalities
         if noise is None:
@@ -607,15 +611,43 @@ class MaskedDPMultimodal(nn.Module):
             top_a_idx_interleaved = top_a_idx * 2 + 1
             noise.scatter_(1, top_a_idx_interleaved, -100.0)
 
+        # Partition the interleaved sequence into 3 bands per row so that
+        # argsort produces exactly [kept-real] < [pad-filler] < [removed-real]:
+        #   band A (kept-real)    : real tokens that survive as context
+        #   band B (pad-filler)   : padding, fills the dense width up to len_keep
+        #   band C (removed-real) : real tokens to reconstruct (the loss targets)
         if valid_mask is not None:
             v = valid_mask.to(device=states.device, dtype=torch.bool)
             if v.dim() == 3 and v.size(-1) == 1:
-                v = v.squeeze(-1)                                   # [B, T, 1] -> [B, T]
-            invalid_interleaved = (~v).repeat_interleave(2, dim=1)  # [B, 2T], s_t/a_t share validity
-            noise = noise.masked_fill(invalid_interleaved, 1.0e4)
+                v = v.squeeze(-1)                          # [B, T, 1] -> [B, T]
+            valid_il = v.repeat_interleave(2, dim=1)       # [B, 2T], s_t/a_t share validity
+
+            n_real = valid_il.sum(dim=1)                                          # [B]
+            keep_real = torch.floor((1.0 - mask_ratio) * n_real.float()).long()   # [B]
+            keep_real = keep_real.clamp(min=self.min_keep_context)                # >=1 real context token
+            keep_real = torch.minimum(keep_real, n_real)                          # never more than exist
+
+            # Rank of each REAL token within its row by noise (ascending). Padding
+            # gets +inf so it never occupies a "real" rank.
+            u_real = noise.masked_fill(~valid_il, float('inf'))
+            real_rank = u_real.argsort(dim=1).argsort(dim=1)                      # [B, 2T]
+
+            is_kept_real    = valid_il & (real_rank <  keep_real.unsqueeze(1))    # band A
+            is_removed_real = valid_il & (real_rank >= keep_real.unsqueeze(1))    # band C
+            is_pad = ~valid_il                                                     # band B
+
+            noise = noise + 1.0e4 * is_pad.float() + 2.0e4 * is_removed_real.float()
+            len_keep = int(keep_real.max().item())
+        else:
+            len_keep = None
 
         # Apply masking on the full interleaved sequence
-        x_masked, mask, ids_restore, ids_keep = self.random_masking(x, mask_ratio, noise=noise)
+        x_masked, mask, ids_restore, ids_keep = self.random_masking(x, mask_ratio, noise=noise, len_keep=len_keep)
+
+        if valid_mask is not None:
+            kept_valid = torch.gather(valid_il, 1, ids_keep)   # [B, len_keep]
+        else:
+            kept_valid = None
 
         # Now separate the kept tokens into states and actions
         # ids_keep[b, j] tells us the original index in [0, 2T-1]
@@ -629,10 +661,15 @@ class MaskedDPMultimodal(nn.Module):
         # We need to maintain batch processing, so we'll use masking
         s_masked = []
         a_masked = []
-        
+        s_valid_kept = []
+        a_valid_kept = []
+
         for b in range(batch_size):
             s_masked.append(x_masked[b, is_state[b]])  # [num_states_kept, D]
             a_masked.append(x_masked[b, is_action[b]])  # [num_actions_kept, D]
+            if kept_valid is not None:
+                s_valid_kept.append(kept_valid[b, is_state[b]])
+                a_valid_kept.append(kept_valid[b, is_action[b]])
         
 
         # Pad to same length within batch using a sentinel value. (removing python for loops)
@@ -642,6 +679,12 @@ class MaskedDPMultimodal(nn.Module):
         # 1D padding masks (True where padding)
         s_pad_mask_1d = (s_masked == self.pad_value).all(dim=-1)
         a_pad_mask_1d = (a_masked == self.pad_value).all(dim=-1)
+
+        if kept_valid is not None:
+            s_vk = pad_sequence(s_valid_kept, batch_first=True, padding_value=False)
+            a_vk = pad_sequence(a_valid_kept, batch_first=True, padding_value=False)
+            s_pad_mask_1d = s_pad_mask_1d | (~s_vk)
+            a_pad_mask_1d = a_pad_mask_1d | (~a_vk)
 
         # Valid-only attention masks
         # [B, L] -> [B, L, L] via outer-product of validity, then add head dim -> [B,1,L,L]
