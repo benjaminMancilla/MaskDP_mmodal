@@ -1,0 +1,63 @@
+defaults:
+  - agent: mdp_procgen
+  - override hydra/launcher: submitit_local
+  - _self_
+
+# task settings
+task: coinrun
+discount: 0.99
+
+# no live environment
+# this is pure offline pretraining.
+use_live_env: false
+
+# dataset convention
+has_dummy_transition: false
+
+# train settings
+num_grad_steps: 400010
+log_every_steps: 1000
+
+# eval DISABLED
+eval_every_steps: 25000
+num_eval_episodes: 10
+use_return_eval: false
+goal_buffer_dir: null
+
+# snapshot
+snapshots: [0, 5000, 10000, 25000, 50000, 75000, 100000, 125000, 150000, 175000, 200000, 250000, 300000, 350000, 400000]
+snapshot_dir: /home/bmancilla/archive/MaskDP/maskdp_snapshots_procgen/
+
+# resume
+resume: false
+resume_dir: none
+resume_step: 0
+
+# dataset TRAIN
+use_raw_replay_dir: true
+replay_buffer_dir: /path/to/your/procgen/dataset  # AJUSTAR antes de correr
+replay_buffer_size: 2000000
+replay_buffer_num_workers: 16
+batch_size: ${agent.batch_size}
+train_file_split: "all"
+train_ratio: 0.8   # unused when file_split="all", kept for the assertion in OfflineReplayBuffer
+eval_ratio: 0.1
+bc_ratio: 0.1
+
+# pixel observation
+obs_type: pixels
+frame_stack: 1
+
+# misc
+seed: 1
+device: cuda
+save_video: false   # no live env to render from anyway
+use_tb: true
+use_wandb: true
+project: maskdp-mm-procgen
+notes: "pretrain procgen coinrun, offline-only (no live env), discrete actions"
+exp_name: procgen_coinrun_placeholder
+
+hydra:
+  run:
+    dir: /home/bmancilla/scratch/maskdp_runs/${now:%Y.%m.%d}/${now:%H%M%S}_${agent.name}_${task}

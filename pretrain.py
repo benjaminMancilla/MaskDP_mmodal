@@ -153,14 +153,29 @@ def main(cfg):
     obs_type     = cfg.get("obs_type", "states")
     pixel_size   = cfg.get("pixel_size", 84)
     _frame_stack = cfg.get("frame_stack", 1)
-    env = dmc.make(cfg.task, seed=cfg.seed, obs_type=obs_type, pixel_size=pixel_size,
-               action_repeat=cfg.get("action_repeat", 2), frame_stack=_frame_stack)
+
+    # use_live_env=False: fully-offline pretraining with no runnable environment
+    use_live_env = cfg.get("use_live_env", True)
+
+    if use_live_env:
+        env = dmc.make(cfg.task, seed=cfg.seed, obs_type=obs_type, pixel_size=pixel_size,
+                   action_repeat=cfg.get("action_repeat", 2), frame_stack=_frame_stack)
+        obs_shape = env.observation_spec().shape
+        action_shape = env.action_spec().shape
+    else:
+        env = None
+        tcfg = cfg.agent.transformer_cfg
+        obs_shape = tuple(tcfg.pixel_obs_shape) if tcfg.get("use_pixel_obs", False) else (1,)
+        action_shape = (1,)
+        print(f"[use_live_env=False] No live environment. obs_shape={obs_shape} action_shape={action_shape} "
+              f"are placeholders -- the model reads pixel_obs_shape/num_actions from transformer_cfg directly. "
+              f"Goal-reaching and masked-return eval are force-disabled (both need env.step()).")
 
     # create agent
     agent = hydra.utils.instantiate(
         cfg.agent,
-        obs_shape=env.observation_spec().shape,
-        action_shape=env.action_spec().shape,
+        obs_shape=obs_shape,
+        action_shape=action_shape,
         train_mode=cfg.agent.train_mode,
     )
     
@@ -199,7 +214,7 @@ def main(cfg):
         payload = torch.load(resume_dir)
         agent.model.load_state_dict(payload["model"])
 
-    domain = get_domain(cfg.task)
+    domain = get_domain(cfg.task) if use_live_env else cfg.task
     if cfg.get("resume", False):
         snapshot_dir = Path(cfg.snapshot_dir) / domain / str(cfg.seed)
     else:
@@ -207,8 +222,8 @@ def main(cfg):
     snapshot_dir.mkdir(exist_ok=True, parents=True)
 
     # create logger
-    cfg.agent.obs_shape = env.observation_spec().shape
-    cfg.agent.action_shape = env.action_spec().shape
+    cfg.agent.obs_shape = obs_shape
+    cfg.agent.action_shape = action_shape
     #exp_name = "_".join([cfg.agent.name, domain, str(cfg.seed)])
     exp_name = str(cfg.exp_name)
     wandb_config = omegaconf.OmegaConf.to_container(
@@ -311,15 +326,16 @@ def main(cfg):
         train_ratio=cfg.get("train_ratio", 0.8),
         eval_ratio=cfg.get("eval_ratio", 0.1),
         bc_ratio=cfg.get("bc_ratio", 0.1),
+        has_dummy_transition=cfg.get("has_dummy_transition", True),
     )
     train_iter = iter(train_loader)
 
     # Create RETURN evaluation loader (disabled by use_return_eval=false for custom dataset runs)
     eval_agent = None
-    if obs_type == "pixels" and cfg.get("use_return_eval", True):
+    if use_live_env and obs_type == "pixels" and cfg.get("use_return_eval", True):
         eval_agent = mdp_return_module.MaskingEvalAgentMultimodal(
-            obs_shape=env.observation_spec().shape,
-            action_shape=env.action_spec().shape,
+            obs_shape=obs_shape,
+            action_shape=action_shape,
             device=device,
             T_cond=cfg.get("eval_T_cond", 32),
             T_pred=cfg.get("eval_T_pred", 32),
@@ -330,7 +346,7 @@ def main(cfg):
     # Create GOAL evaluation loader
     goal_iter = None
     video_recorder = None
-    if hasattr(cfg, 'goal_buffer_dir') and cfg.goal_buffer_dir is not None:
+    if use_live_env and hasattr(cfg, 'goal_buffer_dir') and cfg.goal_buffer_dir is not None:
         goal_dir = Path(cfg.goal_buffer_dir) / cfg.task
         if goal_dir.exists():
             print(f"goal evaluation dir: {goal_dir}")
