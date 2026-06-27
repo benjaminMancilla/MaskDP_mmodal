@@ -1,0 +1,14 @@
+# @package agent
+_target_: agent.mdp_bct.BCTEvalAgentMultimodal
+name: mdp_bct
+obs_shape: ???     # placeholder, igual que en pretrain.py para use_pixel_obs=True;
+action_shape: ???  # las shapes reales (pixel_obs_shape, num_actions) viven en transformer_cfg
+device: ${device}
+
+# BCT eval params
+K: null            # null -> usa transformer_cfg.traj_length completo (decisión por defecto)
+temperature: 1.0   # muestreo con T=1.0 para igualar a Meta (eval_DT_agent usa sample=True, temperature=1.0)
+sample: true       # true: Categorical(logits/temperature).sample() | false: argmax (configurable, brief §3.D)
+
+path: null
+transformer_cfg: null

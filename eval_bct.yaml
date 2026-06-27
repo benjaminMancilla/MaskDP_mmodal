@@ -1,0 +1,37 @@
+defaults:
+  - agent: mdp_bct
+  - _self_
+
+# task
+env_name: coinrun
+distribution_mode: easy
+
+# Splits fijos del protocolo de Meta para coinrun 1M expert level_200 (brief §3.B):
+# el dataset solo vio niveles 0-199 (easy) -> train = held-in, val = niveles intermedios
+# nunca vistos en train pero parte de la "distribución conocida", test = held-out real
+# (resto de la distribución infinita de Procgen, niveles nunca vistos).
+splits:
+  train:
+    start_level: 0
+    num_levels: 200
+  val:
+    start_level: 200
+    num_levels: 50
+  test:
+    start_level: 250
+    num_levels: 0   # 0 = todo el resto de la distribución infinita (sin acotar)
+
+# eval
+num_episodes: 100   # por split, igual que evaluate_offline_agent.py
+
+# checkpoints a evaluar -- usar agent.path para uno solo, o esta lista para varios
+# (p.ej. distintos snapshots/seeds del mismo entrenamiento)
+eval_snapshots: []
+
+# misc
+seed: 1
+device: cuda
+use_wandb: true
+project: maskdp-mm-procgen-bct-eval
+notes: "BCT closed-loop eval, comparable contra Mediratta et al. ICLR 2024"
+exp_name: bct_eval_coinrun_easy
