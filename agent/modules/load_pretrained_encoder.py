@@ -89,7 +89,7 @@ def verify_load(ckpt_path: str, obs_shape=(64, 64, 9), feature_dim=256):
     print("  Verification passed.")
 
 
-def load_procgen_impala(encoder, ckpt_path: str, freeze: bool = True):
+def load_procgen_impala(encoder, ckpt_path: str, freeze: bool = True, ignore_proj: bool = False):
     """
     Load a clean checkpoint into an ImpalaProcgenEncoder instance.
     Loads convnet and projection
@@ -105,8 +105,21 @@ def load_procgen_impala(encoder, ckpt_path: str, freeze: bool = True):
         }
     """
     ckpt = torch.load(ckpt_path, map_location="cpu")
+    
+    if not ignore_proj and "projection" in ckpt:
+        ckpt_proj_weight = ckpt["projection"]["weight"]
+        if ckpt_proj_weight.shape[0] != encoder.projection.out_features:
+            print(f"  [load_procgen_impala] WARNING: feature_dim of IMPALA encoder ({encoder.projection.out_features}) "
+                  f"does not match with ({ckpt_proj_weight.shape[0]}). Forzing ignore_proj=True.")
+            ignore_proj = True
 
-    for submodule_name in ("convnet", "projection"):
+    submodules_to_load = ["convnet"]
+    if not ignore_proj:
+        submodules_to_load.append("projection")
+    else:
+        print("  [load_procgen_impala] ignore_proj=True. [RANDOM PROJECTION LAYER])")
+        
+    for submodule_name in submodules_to_load:
         if submodule_name not in ckpt:
             raise KeyError(
                 f"  [load_procgen_impala] ckpt at {ckpt_path} has no '{submodule_name}' "
