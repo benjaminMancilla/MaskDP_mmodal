@@ -92,16 +92,25 @@ class MaskedDPMultimodal(nn.Module):
             pixel_obs_shape = tuple(config.pixel_obs_shape)
             pixel_encoder_type = str(getattr(config, "pixel_encoder_type", "drqv2"))
 
+            encoder_trainable = bool(getattr(config, "encoder_trainable", False))
+            encoder_init = str(getattr(config, "encoder_init", "pretrained"))
+            if encoder_init not in ("pretrained", "random"):
+                raise ValueError(
+                    f"encoder_init must be 'pretrained' or 'random', got '{encoder_init}'"
+                )
+            print(f"[PixelEncoder] encoder_trainable={encoder_trainable}, encoder_init='{encoder_init}'")
+
             self.pixel_encoder = PixelEncoder(pixel_obs_shape, self.enc_n_embd, encoder_type=pixel_encoder_type)
 
             pretrained_path = getattr(config, "pretrained_encoder_path", None)
-            if pretrained_path is not None:
+            if encoder_init == "pretrained" and pretrained_path is not None:
                 # Dispatch by encoder_type: each pretrained checkpoint format
-                # (DrQ-v2 convnet-only vs. Procgen IMPALA convnet+projection)
+                # (DrQ-v2 convnet-only vs. Procgen IMPALA convnet+projection).
+                # freeze=not encoder_trainable: frozen baseline OR trainable fine-tune.
                 if pixel_encoder_type == "drqv2":
-                    load_drqbc_convnet(self.pixel_encoder, pretrained_path, freeze=True)
+                    load_drqbc_convnet(self.pixel_encoder, pretrained_path, freeze=not encoder_trainable)
                 elif pixel_encoder_type == "procgen_impala":
-                    load_procgen_impala(self.pixel_encoder, pretrained_path, freeze=True)
+                    load_procgen_impala(self.pixel_encoder, pretrained_path, freeze=not encoder_trainable)
                 else:
                     raise ValueError(
                         f"No pretrained-weights loader registered for "
@@ -110,6 +119,20 @@ class MaskedDPMultimodal(nn.Module):
                         f"it here, or omit 'pretrained_encoder_path' to train "
                         f"'{pixel_encoder_type}' from scratch."
                     )
+            elif encoder_init == "random":
+                # Skip pretrained loading; apply freeze if encoder_trainable=False.
+                if not encoder_trainable:
+                    for p in self.pixel_encoder.parameters():
+                        p.requires_grad = False
+                print(
+                    f"  [PixelEncoder] encoder_init=random → random init "
+                    f"({'frozen' if not encoder_trainable else 'trainable'})."
+                )
+            else:
+                raise ValueError(
+                    f"pretrained_path is missing with 'pretrained' encoder_init"
+                )
+                
 
             self.state_embed = nn.Identity()
             trainable = sum(p.numel() for p in self.pixel_encoder.parameters() if p.requires_grad)
