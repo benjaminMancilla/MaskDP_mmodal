@@ -65,6 +65,7 @@ class MetersGroup(object):
         self._meters = defaultdict(AverageMeter)
         self._csv_file = None
         self._csv_writer = None
+        self._csv_fieldnames = None
         self.use_wandb = use_wandb
 
     def log(self, key, value, n=1):
@@ -81,7 +82,7 @@ class MetersGroup(object):
             data[key] = meter.value()
         return data
 
-    def _remove_old_entries(self, data):
+    def _remove_old_entries(self, data, fieldnames):
         rows = []
         with self._csv_file_name.open("r") as f:
             reader = csv.DictReader(f)
@@ -91,24 +92,48 @@ class MetersGroup(object):
                         break
                 rows.append(row)
         with self._csv_file_name.open("w") as f:
-            writer = csv.DictWriter(f, fieldnames=sorted(data.keys()), restval=0.0)
+            writer = csv.DictWriter(f, fieldnames=sorted(fieldnames), restval=0.0, extrasaction="ignore")
             writer.writeheader()
             for row in rows:
                 writer.writerow(row)
 
+    def _expand_csv_fieldnames(self):
+        self._csv_file.close()
+        with self._csv_file_name.open("r") as f:
+            rows = list(csv.DictReader(f))
+        fieldnames = sorted(self._csv_fieldnames)
+        with self._csv_file_name.open("w") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames, restval=0.0, extrasaction="ignore")
+            writer.writeheader()
+            for row in rows:
+                writer.writerow(row)
+        self._csv_file = self._csv_file_name.open("a")
+        self._csv_writer = csv.DictWriter(self._csv_file, fieldnames=fieldnames, restval=0.0, extrasaction="ignore")
+
     def _dump_to_csv(self, data):
+        keys = set(data.keys())
+
         if self._csv_writer is None:
-            should_write_header = True
             if self._csv_file_name.exists():
-                self._remove_old_entries(data)
+                with self._csv_file_name.open("r") as f:
+                    existing_header = next(csv.reader(f), [])
+                self._csv_fieldnames = set(existing_header) | keys
+                self._remove_old_entries(data, self._csv_fieldnames)
                 should_write_header = False
+            else:
+                should_write_header = True
+                self._csv_fieldnames = set(keys)
 
             self._csv_file = self._csv_file_name.open("a")
             self._csv_writer = csv.DictWriter(
-                self._csv_file, fieldnames=sorted(data.keys()), restval=0.0
+                self._csv_file, fieldnames=sorted(self._csv_fieldnames), restval=0.0, extrasaction="ignore"
             )
             if should_write_header:
                 self._csv_writer.writeheader()
+
+        elif not keys.issubset(self._csv_fieldnames):
+            self._csv_fieldnames |= keys
+            self._expand_csv_fieldnames()
 
         self._csv_writer.writerow(data)
         self._csv_file.flush()

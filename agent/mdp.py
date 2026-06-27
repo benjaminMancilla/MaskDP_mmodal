@@ -874,7 +874,21 @@ class MaskedDPMultimodal(nn.Module):
         state_loss = loss_s_t.sum() / denom
         action_loss = loss_a_t.sum() / denom
 
-        return masked_loss, state_loss, action_loss
+        # action_acc only on the masked tokens (not including padding)
+        # action_acc_all_valid on masked + unmasked (not including padding)
+        action_acc = None
+        action_acc_all_valid = None
+        if self.discrete_actions:
+            with torch.no_grad():
+                pred_idx = pred_a.argmax(dim=-1)              # [B, T]
+                correct = (pred_idx == a_tgt)                 # [B, T]
+                action_removed = mask[:, 1::2].bool()
+                valid_bool = v_t.bool()
+                sel = action_removed & valid_bool
+                action_acc = correct[sel].float().mean() if sel.any() else pred_a.new_tensor(float('nan'))
+                action_acc_all_valid = correct[valid_bool].float().mean() if valid_bool.any() else pred_a.new_tensor(float('nan'))
+
+        return masked_loss, state_loss, action_loss, action_acc, action_acc_all_valid
 
 
 class MaskedDPMultimodalAgent:
@@ -1146,7 +1160,7 @@ class MaskedDPMultimodalAgent:
             ).mean()
             print(f"[DEBUG step={step}] embedding norm: {norms.mean():.4f} ± {norms.std():.4f} | inter-frame cosine sim: {sim:.4f}")
         
-        mask_loss, state_loss, action_loss = self.model.forward_loss(
+        mask_loss, state_loss, action_loss, action_acc, action_acc_all_valid = self.model.forward_loss(
             target_s, actions, pred_s, pred_a, mask, valid_mask=valid_mask
         )
         
@@ -1166,6 +1180,17 @@ class MaskedDPMultimodalAgent:
             metrics["mask_loss"] = mask_loss.item()
             metrics["state_loss"] = state_loss.item()
             metrics["action_loss"] = action_loss.item()
+            if action_acc is not None and not torch.isnan(action_acc):
+                metrics["action_acc"] = action_acc.item()
+            if action_acc_all_valid is not None and not torch.isnan(action_acc_all_valid):
+                metrics["action_acc_all_valid"] = action_acc_all_valid.item()
+
+            # CE/accuracy per masking ratio
+            mr_key = f"{mask_ratio:.2f}"
+            if not np.isnan(action_loss.item()):
+                metrics[f"by_mr/action_loss_mr{mr_key}"] = action_loss.item()
+            if action_acc is not None and not torch.isnan(action_acc):
+                metrics[f"by_mr/action_acc_mr{mr_key}"] = action_acc.item()
 
         return metrics
 
@@ -1188,7 +1213,7 @@ class MaskedDPMultimodalAgent:
         with torch.no_grad():
             target_s = self.model._embed_states(obs)
 
-        mask_loss, state_loss, action_loss = self.model.forward_loss(
+        mask_loss, state_loss, action_loss, action_acc, action_acc_all_valid = self.model.forward_loss(
             target_s, action, pred_s, pred_a, mask, valid_mask=valid_mask
         )
 
@@ -1196,6 +1221,10 @@ class MaskedDPMultimodalAgent:
             metrics["val_mask_loss"] = mask_loss.item()
             metrics["val_state_loss"] = state_loss.item()
             metrics["val_action_loss"] = action_loss.item()
+            if action_acc is not None and not torch.isnan(action_acc):
+                metrics["val_action_acc"] = action_acc.item()
+            if action_acc_all_valid is not None and not torch.isnan(action_acc_all_valid):
+                metrics["val_action_acc_all_valid"] = action_acc_all_valid.item()
 
         return metrics
 

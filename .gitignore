@@ -10,5 +10,5 @@ slurm/
 data/
 datasets/
 outputs/
-diagnostics/
+diagnostics_scripts/
 out/
