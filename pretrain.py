@@ -260,6 +260,9 @@ def main(cfg):
             f.write(f"Dropout Prob: {cfg.agent.transformer_cfg.modality_dropout_prob}\n")
             f.write(f"Early Fusion: {cfg.agent.transformer_cfg.get('use_early_fusion', False)}\n")
             f.write(f"MLP Ratio: {cfg.agent.transformer_cfg.get('mlp_ratio', 4)}\n")
+            f.write(f"Encoder Trainable: {cfg.agent.transformer_cfg.get('encoder_trainable', False)}\n")
+            f.write(f"Encoder Init: {cfg.agent.transformer_cfg.get('encoder_init', 'pretrained')}\n")
+            f.write(f"State Target: {cfg.agent.transformer_cfg.get('state_target', 'embedding')}\n")
     
     # WandB: Clone metrics from another run
     if cfg.get("copy_metrics_from", None) and cfg.use_wandb:

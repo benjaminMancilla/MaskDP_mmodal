@@ -64,6 +64,11 @@ transformer_cfg:
   freeze_encoder_after: 0
   pretrained_encoder_path: "/home/bmancilla/archive/MaskDP/pretrained_encoders/procgen_coinrun_easy_encoder.pt"
 
+  # Pixel recon
+  encoder_trainable: false
+  encoder_init: pretrained   # pretrained|random -- pretrained = warm-start, random = radom weights (from scratch)
+  state_target: embedding    # embedding|pixel -- pixel = MAE, embedding = latent space/propioceptive states
+
   # Discrete Actions
   discrete_actions: true      # nn.Embedding + cross-entropy instead of nn.Linear + MSE/Tanh
   num_actions: 15             # action space size (for Procgen is [0,..,14])
