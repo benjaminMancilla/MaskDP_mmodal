@@ -13,6 +13,7 @@ from einops import rearrange, reduce, repeat
 from agent.modules.attention import Block, CausalSelfAttention, CoAttentionBlock, ParallelCoAttentionBlock, AdapterMLP, CoAttentionBlockSharedMLP
 from agent.modules.pixel_encoder import PixelEncoder
 from agent.modules.load_pretrained_encoder import load_drqbc_convnet, load_procgen_impala
+from agent.modules.pixel_recon_decoder import PixelReconDecoder
 
 
 class MaskedDPMultimodal(nn.Module):
@@ -21,6 +22,23 @@ class MaskedDPMultimodal(nn.Module):
         if self.pixel_encoder is not None:
             return self.pixel_encoder(states)
         return self.state_embed(states)
+
+    def _make_state_target(self, states: torch.Tensor) -> torch.Tensor:
+        if self.state_target == "pixel":
+            return states.float() / 255.0
+        return self._embed_states(states)
+
+    def _predict_state(self, dec_tokens: torch.Tensor) -> torch.Tensor:
+        if self.state_target == "pixel":
+            # [B, T, D] -> [B, T, 1, D] -> PixelReconDecoder -> [B, T, H, W, C]
+            return self.pixel_recon_decoder(dec_tokens.unsqueeze(2))
+        return self.state_head(dec_tokens)
+
+    def _zero_state_pred(self, batch_size: int, T: int, device) -> torch.Tensor:
+        if self.state_target == "pixel":
+            d = self.pixel_recon_decoder
+            return torch.zeros(batch_size, T, d.H, d.W, d.C, device=device)
+        return torch.zeros(batch_size, T, self.state_pred_dim, device=device)
 
     def __init__(self, obs_dim, action_dim, config, train_mode='joint'):
         super().__init__()
@@ -90,6 +108,7 @@ class MaskedDPMultimodal(nn.Module):
         self.use_pixel_obs = getattr(config, "use_pixel_obs", False)
         if self.use_pixel_obs:
             pixel_obs_shape = tuple(config.pixel_obs_shape)
+            self.pixel_obs_shape = pixel_obs_shape
             pixel_encoder_type = str(getattr(config, "pixel_encoder_type", "drqv2"))
 
             encoder_trainable = bool(getattr(config, "encoder_trainable", False))
@@ -286,6 +305,47 @@ class MaskedDPMultimodal(nn.Module):
             nn.ReLU(inplace=True),
             nn.Linear(self.dec_n_embd, self.state_pred_dim),
         )
+
+        # --------------------------------------------------------------------------
+        # state_target: what the state/reconstruction loss targets.
+        #   'embedding' (default): predict the (frozen) encoder embedding
+        #   'pixel': predict raw pixels (MAE-style). Target is the external
+        # Routes through PixelReconDecoder instead of state_head when 'pixel'.
+        self.state_target = str(getattr(config, "state_target", "embedding"))
+        if self.state_target not in ("embedding", "pixel"):
+            raise ValueError(
+                f"state_target must be 'embedding' or 'pixel', got '{self.state_target}'"
+            )
+        if self.state_target == "pixel":
+            assert self.use_pixel_obs, (
+                "state_target='pixel' requires use_pixel_obs=True — the pixel-recon "
+                "target is the raw frame, which only exists when observations are pixels."
+            )
+            if self.use_pixel_obs and not bool(getattr(config, "encoder_trainable", False)):
+                print(
+                    "[state_target=pixel] Warning: encoder_trainable=False — pixel-recon "
+                    "with a frozen encoder is a valid ablation, but the main point of "
+                    "this target (frozen->trainable + MAE) needs encoder_trainable=True."
+                )
+            self.pixel_recon_decoder = PixelReconDecoder(
+                d_model=self.dec_n_embd,
+                tokens_per_frame=1,
+                frame_hw=(self.pixel_obs_shape[0], self.pixel_obs_shape[1]),
+                channels=self.pixel_obs_shape[2],
+            )
+            print(
+                f"[state_target=pixel] PixelReconDecoder: frame_hw="
+                f"{self.pixel_obs_shape[:2]}, channels={self.pixel_obs_shape[2]}, "
+                f"d_model={self.dec_n_embd}"
+            )
+        else:
+            self.pixel_recon_decoder = None
+            if self.use_pixel_obs and bool(getattr(config, "encoder_trainable", False)):
+                print(
+                    "[state_target=embedding] Warning: encoder_trainable=True with "
+                    "state_target='embedding' is the naive unfreeze that the brief "
+                    "warns breaks (moving-target/collapse). Did you mean state_target='pixel'?"
+                )
         # --------------------------------------------------------------------------
         self.initialize_weights()
         
@@ -763,7 +823,8 @@ class MaskedDPMultimodal(nn.Module):
             x_fused: [B, len_keep, D] kept tokens in ids_keep / ids_shuffle-kept order (post-fusion)
             ids_restore: [B, total_len] indices to restore original interleaved order
         Returns:
-            s_pred: [B, T, obs_dim]
+            s_pred: [B, T, state_pred_dim] if state_target=='embedding', or
+                    [B, T, H, W, C]        if state_target=='pixel'
             a_pred: [B, T, action_dim] (continuous) or [B, T, num_actions] logits (discrete)
         """
         
@@ -795,7 +856,7 @@ class MaskedDPMultimodal(nn.Module):
                 x_dec = blk(x_dec, self.attn_mask)
 
             # dummy for actions
-            s_pred = self.state_head(x_dec[:, ::2])
+            s_pred = self._predict_state(x_dec[:, ::2])
             a_dim_out = self.num_actions if self.discrete_actions else self.action_dim
             a_pred = torch.zeros(batch_size, total_len // 2, a_dim_out, device=x.device)
         
@@ -810,7 +871,7 @@ class MaskedDPMultimodal(nn.Module):
 
             # dummy for states
             a_pred = self.action_head(x_dec[:, 1::2])
-            s_pred = torch.zeros(batch_size, total_len // 2, self.state_pred_dim, device=x.device)
+            s_pred = self._zero_state_pred(batch_size, total_len // 2, x.device)
         
         else:  # 'joint'
             # Project to decoder embedding space
@@ -828,12 +889,20 @@ class MaskedDPMultimodal(nn.Module):
                 x = blk(x, self.attn_mask)
             
             # Split and predict
-            s_pred = self.state_head(x[:, ::2])
+            s_pred = self._predict_state(x[:, ::2])
             a_pred = self.action_head(x[:, 1::2])
         
         return s_pred, a_pred
 
     def forward_loss(self, target_s, target_a, pred_s, pred_a, mask, valid_mask=None):
+        # Pixel-recon target/pred arrive as [B, T, H, W, C] (state_target='pixel').
+        # Flatten to [B, T, H*W*C] so everything below (norm, MSE, masking) is
+        # identical regardless of whether the state target is an embedding or a frame
+        if target_s.dim() == 5:
+            b5, t5, h5, w5, c5 = target_s.shape
+            target_s = target_s.reshape(b5, t5, h5 * w5 * c5)
+            pred_s = pred_s.reshape(b5, t5, h5 * w5 * c5)
+
         batch_size, T, _ = target_s.size()
 
         with torch.no_grad():
@@ -1171,17 +1240,7 @@ class MaskedDPMultimodalAgent:
         
         # Loss
         with torch.no_grad():
-            target_s = self.model._embed_states(states)  # (B, T, enc_embd)
-
-        # DEBUG — remover después de verificar
-        if step % 5000 == 0:
-            norms = torch.norm(target_s, dim=-1)  # debería ser ~1.0 por L2 norm
-            sim = torch.nn.functional.cosine_similarity(
-                target_s[:, 0].unsqueeze(1),   # primer frame
-                target_s[:, 1:],               # resto de frames
-                dim=-1
-            ).mean()
-            print(f"[DEBUG step={step}] embedding norm: {norms.mean():.4f} ± {norms.std():.4f} | inter-frame cosine sim: {sim:.4f}")
+            target_s = self.model._make_state_target(states)
         
         mask_loss, state_loss, action_loss, action_acc, action_acc_all_valid = self.model.forward_loss(
             target_s, actions, pred_s, pred_a, mask, valid_mask=valid_mask
@@ -1230,11 +1289,12 @@ class MaskedDPMultimodalAgent:
             x_fused, ids_restore
         )
 
-        # Embed raw obs -> latent target, mirroring update_mdp exactly.
-        # In pixel mode obs is (B, T, H, W, C) — passing it raw to forward_loss
-        # causes a shape error and computes the wrong loss.
+        # Build the state/recon target exactly like update_mdp.
+        # In pixel mode obs is (B, T, H, W, C): _make_state_target normalizes
+        # it to [0,1] directly (no encoder pass); in embedding mode it embeds via
+        # _embed_states.
         with torch.no_grad():
-            target_s = self.model._embed_states(obs)
+            target_s = self.model._make_state_target(obs)
 
         mask_loss, state_loss, action_loss, action_acc, action_acc_all_valid = self.model.forward_loss(
             target_s, action, pred_s, pred_a, mask, valid_mask=valid_mask
