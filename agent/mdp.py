@@ -1027,13 +1027,35 @@ class MaskedDPMultimodalAgent:
         ).to(device)
         self.mask_ratio = mask_ratio
         # optimizers
-        # Tag the initial group with target_lr so that warmup logic works correctly
-        # even when no freeze_schedule is active (full-model training with warmup).
-        # When a freeze_schedule IS active, _rebuild_optimizer / _add_encoder_param_groups
-        # will replace this at step 0 before any gradient is taken.
-        self.opt = torch.optim.Adam(
-            [{'params': [p for p in self.model.parameters() if p.requires_grad], 'lr': lr, 'target_lr': lr, 'name': 'all_params'}]
-        )
+        if self.model.pixel_encoder is not None:
+            encoder_param_ids = {p.data_ptr() for p in self.model.pixel_encoder.parameters()}
+        else:
+            encoder_param_ids = set()
+
+        encoder_params, other_params = [], []
+        for p in self.model.parameters():
+            if not p.requires_grad:
+                continue
+            if p.data_ptr() in encoder_param_ids:
+                encoder_params.append(p)
+            else:
+                other_params.append(p)
+
+        # Tag every group with target_lr so warmup logic works correctly
+        param_groups = []
+        if other_params:
+            param_groups.append({'params': other_params, 'lr': lr, 'target_lr': lr, 'name': 'all_params'})
+        if encoder_params:
+            param_groups.append({
+                'params': encoder_params, 'lr': self.finetune_lr, 'target_lr': self.finetune_lr,
+                'name': 'pixel_encoder',
+            })
+            print(f"[Optimizer] pixel_encoder: {len(encoder_params)} trainable param tensors "
+                  f"@ lr={self.finetune_lr} (separate group from the rest @ lr={lr})")
+        if not param_groups:
+            param_groups = [{'params': [], 'lr': lr, 'target_lr': lr, 'name': 'empty'}]
+
+        self.opt = torch.optim.Adam(param_groups)
         print(
             "number of parameters: %e", sum(p.numel() for p in self.model.parameters())
         )
