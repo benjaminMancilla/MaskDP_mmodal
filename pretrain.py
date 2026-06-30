@@ -376,7 +376,50 @@ def main(cfg):
             video_recorder = VideoRecorder(work_dir if cfg.save_video else None)
         else:
             print(f"Warning: Goal dir {goal_dir} not found. Skipping goal evaluation.")
-            
+
+    # Procgen - Epoch validation and early stopping
+    bct_eval_agent = None
+    early_stopper = None
+    bct_splits = None
+    eval_bct_module = None
+    if cfg.get("use_bct_eval", False):
+        import agent.mdp_bct as mdp_bct_module
+        import eval_bct as eval_bct_module
+
+        bct_env_name = cfg.get("bct_env_name", cfg.task)
+        bct_distribution_mode = cfg.get("bct_distribution_mode", "easy")
+        assert bct_env_name in eval_bct_module.PROCGEN, (
+            f"bct_env_name='{bct_env_name}' no está en el dict PROCGEN de normalización (eval_bct.py)."
+        )
+        bct_splits = cfg.get("bct_splits", None)
+        assert bct_splits is not None, "use_bct_eval=True requiere definir cfg.bct_splits (train/val/test)."
+
+        bct_eval_agent = mdp_bct_module.BCTEvalAgentMultimodal(
+            obs_shape=obs_shape,
+            action_shape=action_shape,
+            device=device,
+            K=cfg.get("bct_eval_K", None),
+            temperature=cfg.get("bct_eval_temperature", 1.0),
+            sample=cfg.get("bct_eval_sample", True),
+            transformer_cfg=agent.config,
+        )
+
+        if cfg.get("early_stop", False):
+            early_stopper = utils.EarlyStop(
+                wait_epochs=cfg.get("early_stop_wait_evals", 10),
+                min_delta=cfg.get("early_stop_min_delta", 0.1),
+                strict=cfg.get("early_stop_strict", True),
+            )
+            # Manual reconstruction on resume
+            init_best = cfg.get("early_stop_init_best_return", None)
+            init_waited = cfg.get("early_stop_init_waited_evals", 0)
+            if init_best is not None:
+                early_stopper.best_mean_return = float(init_best)
+                print(f"[EarlyStop] Manual init: best_mean_return={early_stopper.best_mean_return}")
+            if init_waited:
+                early_stopper.waited_epochs = int(init_waited)
+                print(f"[EarlyStop] Manual init: waited_epochs={early_stopper.waited_epochs}")
+
     timer = utils.Timer()
     if not cfg.get("finetune_from", None):
         global_step = cfg.resume_step
@@ -384,6 +427,18 @@ def main(cfg):
     train_until_step = utils.Until(cfg.num_grad_steps)
     eval_every_step = utils.Every(cfg.eval_every_steps)
     log_every_step = utils.Every(cfg.log_every_steps)
+
+    steps_per_epoch = cfg.get("steps_per_epoch", None)
+    if steps_per_epoch is None:
+        steps_per_epoch = max(1, round(1_000_000 / cfg.batch_size))
+    print(f"[BCT val] steps_per_epoch={steps_per_epoch} (batch_size={cfg.batch_size})")
+
+    bct_eval_every = None
+    if bct_eval_agent is not None:
+        bct_eval_every_steps = steps_per_epoch * cfg.get("bct_eval_every_epochs", 5)
+        bct_eval_every = utils.Every(bct_eval_every_steps)
+        print(f"[BCT val] evaluating every {cfg.get('bct_eval_every_epochs', 5)} epochs "
+              f"= every {bct_eval_every_steps} steps")
 
     while train_until_step(global_step):
         # Training step
@@ -459,6 +514,89 @@ def main(cfg):
 
             agent.model.train()
 
+        stop_training = False
+        if bct_eval_agent is not None and bct_eval_every(global_step):
+            print(f"[{global_step}] Running BCT validation (raw_return, train/val/test)...")
+            bct_eval_agent.mdp.load_state_dict(agent.model.state_dict())
+            bct_eval_agent.eval()
+
+            bct_results = {}
+            with torch.no_grad():
+                for split_name, split_cfg in bct_splits.items():
+                    mean_raw, std_raw, _ = eval_bct_module.eval_bct_split(
+                        bct_eval_agent,
+                        device,
+                        env_name=bct_env_name,
+                        num_levels=split_cfg["num_levels"],
+                        start_level=split_cfg["start_level"],
+                        distribution_mode=bct_distribution_mode,
+                        num_episodes=cfg.get("bct_eval_episodes", 10),
+                    )
+                    bct_results[split_name] = {"raw_return": mean_raw, "raw_return_std": std_raw}
+
+            print(
+                "  [BCT val] "
+                + " | ".join(
+                    f"{name}={r['raw_return']:.2f}±{r['raw_return_std']:.2f}"
+                    for name, r in bct_results.items()
+                )
+            )
+
+            if cfg.use_wandb:
+                wandb_data = {
+                    f"validation/raw_return_{name}": r["raw_return"]
+                    for name, r in bct_results.items()
+                }
+                wandb_data.update(
+                    {
+                        f"validation/raw_return_std_{name}": r["raw_return_std"]
+                        for name, r in bct_results.items()
+                    }
+                )
+                wandb_data["validation/epoch"] = global_step / steps_per_epoch
+                wandb.log(wandb_data, step=global_step)
+
+            # Early stopping decision, val split ONLY.
+            is_new_best = False
+            if early_stopper is not None:
+                val_return = bct_results["val"]["raw_return"]
+                prev_best_epoch = early_stopper.best_mean_return_epoch
+                stop_training = early_stopper.should_stop(global_step, val_return)
+                is_new_best = early_stopper.best_mean_return_epoch != prev_best_epoch
+
+                if cfg.use_wandb:
+                    wandb.log(
+                        {
+                            "validation/best_raw_return_val": early_stopper.best_mean_return,
+                            "validation/early_stop_waited_evals": early_stopper.waited_epochs,
+                        },
+                        step=global_step,
+                    )
+
+            # Checkpointing
+            if cfg.get("early_stop", False):
+                payload = {
+                    "model": agent.model.state_dict(),
+                    "cfg": cfg.agent.transformer_cfg,
+                    "step": global_step,
+                }
+                snapshot = snapshot_dir / f"snapshot_{global_step}.pt"
+                with snapshot.open("wb") as f:
+                    torch.save(payload, f)
+
+                if is_new_best:
+                    best_snapshot = snapshot_dir / "snapshot_best.pt"
+                    with best_snapshot.open("wb") as f:
+                        torch.save(payload, f)
+                    print(f"  [BCT val] New best val raw_return={early_stopper.best_mean_return:.2f} "
+                          f"-> saved {best_snapshot.name}")
+
+            if stop_training:
+                print(f"[{global_step}] Early stopping: no improvement in val raw_return for "
+                      f"{early_stopper.wait_epochs} validation checks. Stopping training.")
+
+            agent.model.train()
+
         if log_every_step(global_step):
             elapsed_time, total_time = timer.reset()
             with logger.log_and_dump_ctx(global_step, ty="train") as log:
@@ -466,7 +604,8 @@ def main(cfg):
                 log("total_time", total_time)
                 log("step", global_step)
 
-        if global_step in cfg.snapshots:
+        # Regular fixed-list snapshots
+        if not cfg.get("early_stop", False) and global_step in cfg.snapshots:
             snapshot = snapshot_dir / f"snapshot_{global_step}.pt"
             payload = {
                 "model": agent.model.state_dict(),
@@ -476,6 +615,9 @@ def main(cfg):
                 torch.save(payload, f)
 
         global_step += 1
+
+        if stop_training:
+            break
 
 
 if __name__ == "__main__":

@@ -24,9 +24,39 @@ num_eval_episodes: 10
 use_return_eval: false
 goal_buffer_dir: null
 
+# Return validation - Procgen eval
+use_bct_eval: false
+bct_env_name: ${task}
+bct_distribution_mode: easy
+bct_eval_episodes: 50        
+bct_eval_every_epochs: 5     # 1 epoch = 1000000 / batch_size steps
+bct_eval_K: null             # null -> uses transformer_cfg.traj_length (full context window)
+bct_eval_temperature: 1.0
+bct_eval_sample: true
+bct_splits:
+  train:
+    start_level: 0
+    num_levels: 200
+  val:
+    start_level: 200
+    num_levels: 50
+  test:
+    start_level: 250
+    num_levels: 0
+
+steps_per_epoch: null
+
+# Early stopping
+early_stop: false
+early_stop_wait_evals: 20        # number of pacience checks
+early_stop_min_delta: 0.1
+early_stop_strict: true
+# resume Early stopping
+early_stop_init_best_return: null  # manual override
+early_stop_init_waited_evals: 0    # manual override
+
 # snapshot
-snapshots: [0, 1000, 2000, 3000, 4000, 5000, 6000, 7000, 8000, 9000, 10000, 
-  12000, 14000, 16000, 18000, 20000, 25000, 50000, 75000, 100000, 125000, 150000, 175000, 200000, 250000, 300000, 350000, 400000]
+snapshots: [0, 5000, 10000, 25000, 50000, 75000, 100000, 125000, 150000, 175000, 200000, 250000, 300000, 350000, 400000]
 snapshot_dir: /home/bmancilla/archive/MaskDP/maskdp_snapshots_procgen/
 
 # resume
