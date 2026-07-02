@@ -1,4 +1,4 @@
-# agent/mdp_recon.yaml
+# agent/mdp_recon_procgen.yaml
 _target_: agent.mdp_recon.ReconstructionEvalAgent
 
 # Total sequence length used during evaluation
@@ -31,24 +31,24 @@ mask_ratio:
 split_ratio: 0.5
 
 # Modality to evaluate.
-#   "actions" : action reconstruction loss only (W&B: maskdp-mm-vd4rl-action-recon)
-#   "states"  : state  reconstruction loss only (W&B: maskdp-mm-vd4rl-state-recon)
-#   "both"    : both losses, single forward pass per episode, logs to both projects
-modality: both
+#   "actions" : action reconstruction metric only (accuracy if discrete, MSE if continuous)
+#   "states"  : state reconstruction MSE only
+#   "both"    : both metrics, single forward pass per episode
+modality: actions
 
 obs_type: pixels
-frame_stack: 3
+frame_stack: 1
 
-# Dataset convention for state/action alignment inside a val episode.
-#   true  (default) : V-D4RL/dm_control convention — dummy first frame,
-#                      action[t] taken FROM state obs[t] (action index leads by 1).
-#   false            : Procgen convention, no dummy frame, action[t] aligned with obs[t].
-has_dummy_transition: true
-# How to handle val episodes shorter than T.
-#   "off"   (default) : skip them
-#   "on"    : zero-pad them to T and evaluate alongside long episodes.
-#             Padding is never used as context and never scored.
-#   "force" : ONLY evaluate short (padded) episodes
+# Procgen convention: no dummy first frame, action[t] aligned with obs[t].
+has_dummy_transition: false
+
+# Procgen episodes have variable length and are frequently shorter than T.
+# Default "off" keeps this eval script's original behavior (skip short
+# episodes); switch to "on" to also evaluate them (padded, same as training), or
+# "force" to evaluate ONLY the padded ones and check the padding path in isolation.
+#   "off"   (default) : skip episodes with real_length < T entirely.
+#   "on"    : zero-pad short episodes to T and evaluate them alongside long ones.
+#   "force" : ONLY evaluate short (padded) episodes.
 padding_mode: "off"
 
 # Snapshot path

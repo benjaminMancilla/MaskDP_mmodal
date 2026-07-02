@@ -1,0 +1,35 @@
+defaults:
+  - agent: mdp_recon_procgen
+  - _self_
+
+# task settings
+task: coinrun
+obs_type: pixels
+pixel_size: 64
+
+# eval
+num_eval_episodes: 100
+
+# Global seed
+seed: 1
+
+# Dataset
+val_replay_dir: /path/to/your/procgen/dataset
+
+# Fraction of files used for validation.
+val_split_ratio: 0.2
+
+# Snapshots
+eval_snapshots: null
+
+# W&B projects
+wandb_project_actions: maskdp-mm-procgen-action-recon
+wandb_project_states:  maskdp-mm-procgen-state-recon
+
+# Misc
+device: cuda
+use_tb: false
+use_wandb: true
+project: maskdp-mm-procgen-recon
+notes: "procgen action reconstruction eval — discrete actions, IMPALA CNN, no dummy transition"
+exp_name: procgen_coinrun_recon_second_half_T64

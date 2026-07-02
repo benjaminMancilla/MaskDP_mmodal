@@ -19,10 +19,10 @@ from agent.mdp_recon import ReconstructionEvalAgent
 
 torch.backends.cudnn.benchmark = True
 
-# W&B projects are hardcoded per modality
-WANDB_PROJECTS = {
-    "actions": "maskdp-mm-vd4rl-action-recon",
-    "states":  "maskdp-mm-vd4rl-state-recon",
+# W&B projects, per modality. Overridable via cfg.wandb_project_actions/states
+DEFAULT_WANDB_PROJECTS = {
+    "actions": "maskdp-mm-procgen-action-recon",
+    "states":  "maskdp-mm-procgen-state-recon",
 }
 
 
@@ -54,6 +54,14 @@ def load_val_episodes(replay_dir: str, val_split_ratio: float) -> List[Dict]:
             ep["observation"] = ep.pop("image")
         episodes.append(ep)
 
+    first = episodes[0]
+    act = first["action"]
+    print(
+        f"[Val loader] episode[0] keys={sorted(first.keys())} | "
+        f"action: shape={act.shape} dtype={act.dtype} "
+        f"min={np.min(act)} max={np.max(act)}"
+    )
+
     return episodes
 
 
@@ -69,6 +77,20 @@ def _infer_obs_shape(episodes: List[Dict], obs_type: str, frame_stack: int) -> T
         return first["observation"].shape[1:]   # (obs_dim,) for proprioceptive
 
 
+def _infer_action_shape(episodes: List[Dict]) -> Tuple[int]:
+    action = episodes[0]["action"]
+    if action.ndim == 1:
+        return (1,)
+    return (action.shape[1],)
+
+
+def _metric_prefix(metrics: Dict) -> str:
+    for k in metrics:
+        if k.endswith("/mean"):
+            return k[: -len("/mean")]
+    return "recon"  # degenerate: no masked tokens in any episode
+
+
 def _log_modality_to_wandb(
     run: wandb.sdk.wandb_run.Run,
     metrics: Dict,
@@ -81,31 +103,46 @@ def _log_modality_to_wandb(
     Scalar metrics are logged directly. by_position is logged as one scalar
     per timestep so curves can be overlaid across models in W&B.
     """
+    metric_kind = _metric_prefix(metrics)  # e.g. "action_recon_acc"
     log_data = {"eval/snapshot_step": global_step}
 
     for k, v in metrics.items():
         if k.endswith("/by_position"):
-            # e.g. action_recon_loss/by_position → eval/action_mse_t000 … t063
-            short = "action_mse" if "action" in k else "state_mse"
-            for t, mse in enumerate(v):
-                log_data[f"{prefix}/{short}_t{t:03d}"] = float(mse)
+            # e.g. action_recon_acc/by_position -> eval/action_acc_t000 … t063
+            #      action_recon_loss/by_position -> eval/action_mse_t000 … t063
+            if "acc" in metric_kind:
+                short = "action_acc"
+            elif "action" in metric_kind:
+                short = "action_mse"
+            else:
+                short = "state_mse"
+            for t, val in enumerate(v):
+                log_data[f"{prefix}/{short}_t{t:03d}"] = float(val)
         else:
             log_data[f"{prefix}/{k}"] = v
 
     run.log(log_data, step=global_step)
 
 
-def _print_modality(label: str, metrics: Dict) -> None:
+def _print_modality(metrics: Dict) -> None:
+    label = _metric_prefix(metrics)
+    is_acc = "acc" in label
+    unit = "accuracy" if is_acc else "MSE"
+
     mean = metrics.get(f"{label}/mean", float("nan"))
     std  = metrics.get(f"{label}/std",  float("nan"))
     by_pos = metrics.get(f"{label}/by_position", [])
-    masked_mses = [v for v in by_pos if v > 0.0]
+    if is_acc:
+        vals = [v for v in by_pos]
+    else:
+        vals = [v for v in by_pos if v > 0.0]
+
     print(
-        f"  {label} | "
+        f"  {label} [{unit}] | "
         f"mean={mean:.6f}  std={std:.6f}  "
-        f"(masked: min={min(masked_mses):.6f}  max={max(masked_mses):.6f})"
-        if masked_mses else
-        f"  {label} | mean={mean:.6f}  std={std:.6f}"
+        f"(masked: min={min(vals):.6f}  max={max(vals):.6f})"
+        if vals else
+        f"  {label} [{unit}] | mean={mean:.6f}  std={std:.6f}"
     )
 
 
@@ -136,13 +173,15 @@ def main(cfg):
     modality    = cfg.agent.modality
     obs_type    = str(cfg.agent.obs_type)
     frame_stack = int(cfg.agent.frame_stack)
+    has_dummy_transition = bool(cfg.agent.get("has_dummy_transition", True))
+    padding_mode = str(cfg.agent.get("padding_mode", "off"))
 
     val_episodes = load_val_episodes(cfg.val_replay_dir, cfg.val_split_ratio)
 
-    obs_shape  = _infer_obs_shape(val_episodes, obs_type, frame_stack)
-    action_dim   = val_episodes[0]["action"].shape[1]
-    action_shape = (action_dim,)
+    obs_shape    = _infer_obs_shape(val_episodes, obs_type, frame_stack)
+    action_shape = _infer_action_shape(val_episodes)
     print(f"obs_type={obs_type}  frame_stack={frame_stack}  "
+          f"has_dummy_transition={has_dummy_transition}  padding_mode={padding_mode}  "
           f"obs_shape={obs_shape}  action_shape={action_shape}")
 
     snapshots = cfg.get("eval_snapshots", None)
@@ -162,10 +201,17 @@ def main(cfg):
         mask_ratio=list(cfg.agent.mask_ratio),
         split_ratio=cfg.agent.split_ratio,
         modality=modality,
-        obs_type=obs_type,        # NEW
-        frame_stack=frame_stack,  # NEW
+        obs_type=obs_type,
+        frame_stack=frame_stack,
+        has_dummy_transition=has_dummy_transition,
+        padding_mode=padding_mode,
         path=first_snap,
     )
+
+    wandb_projects = {
+        "actions": str(cfg.get("wandb_project_actions", DEFAULT_WANDB_PROJECTS["actions"])),
+        "states":  str(cfg.get("wandb_project_states",  DEFAULT_WANDB_PROJECTS["states"])),
+    }
 
     exp_name = str(cfg.exp_name)
 
@@ -192,7 +238,7 @@ def main(cfg):
 
         scheme_detail = (
             f"split_ratio={cfg.agent.split_ratio} | "
-            if cfg.agent.masking_scheme == "temporal_split"
+            if cfg.agent.masking_scheme in ("temporal_split", "last_action")
             else ""
         )
         print(
@@ -207,32 +253,37 @@ def main(cfg):
 
         # Print immediately so progress is visible in the cluster log
         if modality == "actions":
-            _print_modality("action_recon_loss", metrics["actions"])
+            _print_modality(metrics["actions"])
         elif modality == "states":
-            _print_modality("state_recon_loss", metrics["states"])
+            _print_modality(metrics["states"])
         elif modality == "both":
-            _print_modality("action_recon_loss", metrics["actions"])
-            _print_modality("state_recon_loss",  metrics["states"])
-            print(f"  total_recon_loss = {metrics['total_recon_loss']:.6f}")
+            _print_modality(metrics["actions"])
+            _print_modality(metrics["states"])
+            if np.isnan(metrics["total_recon_loss"]):
+                print("  total_recon_loss = N/A "
+                      "(discrete action metric is an accuracy, not a loss — "
+                      "see actions/states above separately)")
+            else:
+                print(f"  total_recon_loss = {metrics['total_recon_loss']:.6f}")
 
     # W&B logging
     if not cfg.use_wandb:
         return
 
     if modality in ("actions", "both"):
-        run = _init_wandb_run(WANDB_PROJECTS["actions"], exp_name, cfg)
+        run = _init_wandb_run(wandb_projects["actions"], exp_name, cfg)
         for global_step, metrics in all_results:
             _log_modality_to_wandb(run, metrics["actions"], "eval", global_step)
-            if modality == "both":
+            if modality == "both" and not np.isnan(metrics["total_recon_loss"]):
                 run.log({"eval/total_recon_loss": metrics["total_recon_loss"]},
                         step=global_step)
         run.finish()
 
     if modality in ("states", "both"):
-        run = _init_wandb_run(WANDB_PROJECTS["states"], exp_name, cfg)
+        run = _init_wandb_run(wandb_projects["states"], exp_name, cfg)
         for global_step, metrics in all_results:
             _log_modality_to_wandb(run, metrics["states"], "eval", global_step)
-            if modality == "both":
+            if modality == "both" and not np.isnan(metrics["total_recon_loss"]):
                 run.log({"eval/total_recon_loss": metrics["total_recon_loss"]},
                         step=global_step)
         run.finish()
