@@ -383,7 +383,13 @@ class ReconstructionEvalAgent:
         )                                                      # (2T,)
         ids_restore = torch.argsort(ids_shuffle).unsqueeze(0)  # (1, 2T)
 
-        pred_s_t, pred_a_t = self.mdp.forward_decoder(x_fused, ids_restore)
+        valid_t_arr = valid_t if valid_t is not None else np.ones(T, dtype=bool)
+        valid_il_np = np.repeat(valid_t_arr, 2)                 # (2T,)
+        valid_il_t = torch.as_tensor(
+            valid_il_np, dtype=torch.bool, device=device
+        ).unsqueeze(0)                                          # (1, 2T)
+
+        pred_s_t, pred_a_t = self.mdp.forward_decoder(x_fused, ids_restore, valid_il=valid_il_t)
         # pred_s_t: (1, T, enc_D)
         # pred_a_t: (1, T, action_dim) continuous, or (1, T, num_actions) logits if discrete
 
