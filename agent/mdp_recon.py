@@ -65,6 +65,10 @@ class ReconstructionEvalAgent:
         Same split_ratio knob as temporal_split but ALSO reveals the state at
         position `cut` and masks/scores ONLY the action at position `cut`.
 
+    "last_action_next_state"
+        Same as last_action, but ALSO reveals s_{cut+1} (the state resulting
+        from a_cut). Still scores ONLY a_cut.
+
     Observation types
     -----------------
     obs_type="states"  : reads episode["observation"] (proprioceptive, float32).
@@ -107,9 +111,9 @@ class ReconstructionEvalAgent:
         self._debug_printed_pred = False  # first-episode prediction-shape debug print guard
         self._debug_printed_padding = False  # first-padded-episode debug print guard
 
-        assert masking_scheme in ("second_half", "random", "temporal_split", "last_action"), (
+        assert masking_scheme in ("second_half", "random", "temporal_split", "last_action", "last_action_next_state"), (
             f"Unknown masking_scheme '{masking_scheme}'. "
-            "Supported: 'second_half', 'random', 'temporal_split', 'last_action'."
+            "Supported: 'second_half', 'random', 'temporal_split', 'last_action', 'last_action_next_state'."
         )
         assert modality in ("actions", "states", "both"), (
             f"Unknown modality '{modality}'. "
@@ -162,7 +166,7 @@ class ReconstructionEvalAgent:
         n_params = sum(p.numel() for p in self.mdp.parameters())
         scheme_detail = (
             f"split_ratio={split_ratio}"
-            if masking_scheme in ("temporal_split", "last_action") else ""
+            if masking_scheme in ("temporal_split", "last_action", "last_action_next_state") else ""
         )
         print(
             f"[ReconstructionEvalAgent] "
@@ -223,6 +227,19 @@ class ReconstructionEvalAgent:
                 cut = min(cut, n_real - 1)  # need >=1 real timestep left to predict
                 ids_keep = np.arange(2 * cut + 1)
                 mask_interleaved[2 * cut + 1] = 1.0
+
+        elif self.masking_scheme == "last_action_next_state":
+            # Same as last_action, but also reveals s_{cut+1}
+            mask_interleaved = np.zeros(total_len, dtype=np.float32)
+            if n_real < 2:
+                ids_keep = np.array([], dtype=np.int64)  # no s_{cut+1} available
+            else:
+                cut = min(int(n_real * self.split_ratio), n_real - 2)  # s_{cut+1} must be real
+                ids_keep = np.concatenate([
+                    np.arange(2 * cut + 1),        # s_0..s_cut, a_0..a_{cut-1}
+                    np.array([2 * (cut + 1)]),     # s_{cut+1}: the one "future" token
+                ]).astype(np.int64)
+                mask_interleaved[2 * cut + 1] = 1.0  # scored: a_cut (unchanged vs last_action)
 
         else:
             raise ValueError(f"Unknown masking_scheme '{self.masking_scheme}'.")
