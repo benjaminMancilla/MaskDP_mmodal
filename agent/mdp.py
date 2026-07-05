@@ -175,6 +175,7 @@ class MaskedDPMultimodal(nn.Module):
         self.min_keep_actions = int(getattr(config, "min_keep_actions", 0))
         # Floor on real (non-padding) context tokens
         self.min_keep_context = int(getattr(config, "min_keep_context", 1))
+        self.use_decoder_valid_mask = bool(getattr(config, "use_decoder_valid_mask", False))
         if self.modality_dropout:
             print(f"Modality Dropout ENABLED (Global Prob={self.modality_dropout_prob})")
             print(f"Rel. Weights -> Action: {self.p_drop_action}, State: {self.p_drop_state}")
@@ -543,6 +544,12 @@ class MaskedDPMultimodal(nn.Module):
         x_keep = torch.where(is_state.unsqueeze(-1), s_slots, a_slots)  # [B, len_keep, D]
         return x_keep
 
+    def _combine_kept_flags(self, s_flags: torch.Tensor, a_flags: torch.Tensor, ids_keep: torch.Tensor) -> torch.Tensor:
+        combined = self._combine_kept_tokens(
+            s_flags.unsqueeze(-1).float(), a_flags.unsqueeze(-1).float(), ids_keep
+        )                                              # [B, len_keep, 1]
+        return combined.squeeze(-1) > 0.5               # [B, len_keep] bool
+
     def forward_fusion(
         self, 
         s_encoded: torch.Tensor, 
@@ -593,7 +600,14 @@ class MaskedDPMultimodal(nn.Module):
 
             if len(self.fusion_blocks) > 0:
                 B, L, _ = x.shape
-                fuse_mask = torch.ones(B, 1, L, L, device=x.device, dtype=torch.float32)
+                if self.use_decoder_valid_mask and s_pad_mask is not None and a_pad_mask is not None:
+                    token_pad = self._combine_kept_flags(s_pad_mask, a_pad_mask, ids_keep)  # [B, L] True=pad
+                    token_valid = ~token_pad
+                    vv = token_valid.unsqueeze(2) & token_valid.unsqueeze(1)
+                    pp = token_pad.unsqueeze(2) & token_pad.unsqueeze(1)
+                    fuse_mask = (vv | pp).unsqueeze(1).to(dtype=torch.float32)
+                else:
+                    fuse_mask = torch.ones(B, 1, L, L, device=x.device, dtype=torch.float32)
                 for blk in self.fusion_blocks:
                     x = blk(x, fuse_mask)
                 x = self.fusion_norm(x)
@@ -817,11 +831,12 @@ class MaskedDPMultimodal(nn.Module):
         # Return also ids_keep to track state/action positions
         return x_fused, mask, ids_restore, ids_keep
 
-    def forward_decoder(self, x_fused: torch.Tensor, ids_restore: torch.Tensor):
+    def forward_decoder(self, x_fused: torch.Tensor, ids_restore: torch.Tensor, valid_il: torch.Tensor = None):
         """MAE-style decoder with support for unimodal training.
         Args:
             x_fused: [B, len_keep, D] kept tokens in ids_keep / ids_shuffle-kept order (post-fusion)
             ids_restore: [B, total_len] indices to restore original interleaved order
+            valid_il: optional [B, total_len] bool, True = real token, False = padding
         Returns:
             s_pred: [B, T, state_pred_dim] if state_target=='embedding', or
                     [B, T, H, W, C]        if state_target=='pixel'
@@ -845,6 +860,22 @@ class MaskedDPMultimodal(nn.Module):
         x = torch.gather(
             x_full, dim=1, index=ids_restore.unsqueeze(-1).repeat(1, 1, x_full.shape[2])
         )
+
+        use_valid_mask = self.use_decoder_valid_mask and (valid_il is not None)
+        if use_valid_mask:
+            v = valid_il.to(device=x.device, dtype=torch.bool)
+            x = torch.where(
+                v.unsqueeze(-1),
+                x,
+                self.mask_token.expand(batch_size, total_len, self.n_embd),
+            )
+            # Block-diagonal: real tokens only attend to real tokens, pad tokens
+            # only attend to (inert) pad tokens.
+            vv = v.unsqueeze(2) & v.unsqueeze(1)
+            pp = (~v).unsqueeze(2) & (~v).unsqueeze(1)
+            dec_attn_mask = (vv | pp).unsqueeze(1).to(dtype=torch.float32)   # [B, 1, 2T, 2T]
+        else:
+            dec_attn_mask = self.attn_mask
         
         if self.train_mode == 'state_only':
             s = self.decoder_state_embed(x[:, ::2])
@@ -853,7 +884,7 @@ class MaskedDPMultimodal(nn.Module):
             x_dec = x_dec + self.decoder_pos_embed[:, :total_len, :]
 
             for blk in self.decoder_blocks:
-                x_dec = blk(x_dec, self.attn_mask)
+                x_dec = blk(x_dec, dec_attn_mask)
 
             # dummy for actions
             s_pred = self._predict_state(x_dec[:, ::2])
@@ -867,7 +898,7 @@ class MaskedDPMultimodal(nn.Module):
             x_dec = x_dec + self.decoder_pos_embed[:, :total_len, :]
 
             for blk in self.decoder_blocks:
-                x_dec = blk(x_dec, self.attn_mask)
+                x_dec = blk(x_dec, dec_attn_mask)
 
             # dummy for states
             a_pred = self.action_head(x_dec[:, 1::2])
@@ -886,7 +917,7 @@ class MaskedDPMultimodal(nn.Module):
             
             # Apply Transformer blocks
             for blk in self.decoder_blocks:
-                x = blk(x, self.attn_mask)
+                x = blk(x, dec_attn_mask)
             
             # Split and predict
             s_pred = self._predict_state(x[:, ::2])
@@ -966,6 +997,13 @@ class MaskedDPMultimodal(nn.Module):
         state_loss = loss_s_t.sum() / denom
         action_loss = loss_a_t.sum() / denom
 
+        # state_loss (above) mixes context tokens with masked/removed
+        # tokens (the actual prediction task), restrict to masked+valid only, so
+        # this metric reflects reconstruction quality specifically.
+        state_removed = mask[:, 0::2]                              # [B, T], 1 = masked-for-recon
+        sel_s = state_removed * v_t                                # exclude padding too
+        state_loss_masked = (loss_s_t * sel_s).sum() / sel_s.sum().clamp(min=1.0e-8)
+
         # action_acc only on the masked tokens (not including padding)
         # action_acc_all_valid on masked + unmasked (not including padding)
         action_acc = None
@@ -980,7 +1018,7 @@ class MaskedDPMultimodal(nn.Module):
                 action_acc = correct[sel].float().mean() if sel.any() else pred_a.new_tensor(float('nan'))
                 action_acc_all_valid = correct[valid_bool].float().mean() if valid_bool.any() else pred_a.new_tensor(float('nan'))
 
-        return masked_loss, state_loss, action_loss, action_acc, action_acc_all_valid
+        return masked_loss, state_loss, action_loss, action_acc, action_acc_all_valid, state_loss_masked
 
 
 class MaskedDPMultimodalAgent:
@@ -1254,17 +1292,24 @@ class MaskedDPMultimodalAgent:
         # Encoder (dual + optional fusion)
         x_fused, mask, ids_restore, ids_keep = \
             self.model.forward_encoder(states, actions, mask_ratio, valid_mask=valid_mask)
-        
+
+        valid_il = None
+        if valid_mask is not None:
+            v = valid_mask.to(device=states.device, dtype=torch.bool)
+            if v.dim() == 3 and v.size(-1) == 1:
+                v = v.squeeze(-1)                          # [B, T, 1] -> [B, T]
+            valid_il = v.repeat_interleave(2, dim=1)        # [B, 2T]
+
         # Decoder
         pred_s, pred_a = self.model.forward_decoder(
-            x_fused, ids_restore
+            x_fused, ids_restore, valid_il=valid_il
         )
         
         # Loss
         with torch.no_grad():
             target_s = self.model._make_state_target(states)
         
-        mask_loss, state_loss, action_loss, action_acc, action_acc_all_valid = self.model.forward_loss(
+        mask_loss, state_loss, action_loss, action_acc, action_acc_all_valid, state_loss_masked = self.model.forward_loss(
             target_s, actions, pred_s, pred_a, mask, valid_mask=valid_mask
         )
         
@@ -1276,6 +1321,24 @@ class MaskedDPMultimodalAgent:
         else:
             raise NotImplementedError
 
+        # Gradient-norm probe (diagnostic, DELETE later)
+        log_now = self.use_tb and step is not None and step % 1000 == 0
+        grad_norm_state_trunk = None
+        grad_norm_action_trunk = None
+        grad_ratio_state_over_action = None
+        if log_now and state_loss.requires_grad and action_loss.requires_grad:
+            probe_params = [p for m in (self.model.fusion_blocks, self.model.decoder_blocks)
+                            for p in m.parameters() if p.requires_grad]
+            if probe_params:
+                g_s = torch.autograd.grad(state_loss, probe_params, retain_graph=True, allow_unused=True)
+                g_a = torch.autograd.grad(self.model.action_loss_weight * action_loss, probe_params,
+                                          retain_graph=True, allow_unused=True)
+                ns = torch.sqrt(sum((g**2).sum() for g in g_s if g is not None))
+                na = torch.sqrt(sum((g**2).sum() for g in g_a if g is not None))
+                grad_norm_state_trunk = ns.item()
+                grad_norm_action_trunk = na.item()
+                grad_ratio_state_over_action = (ns / na.clamp(min=1e-12)).item()
+
         self.opt.zero_grad(set_to_none=True)
         loss.backward()
         self.opt.step()
@@ -1284,6 +1347,8 @@ class MaskedDPMultimodalAgent:
             metrics["mask_loss"] = mask_loss.item()
             metrics["state_loss"] = state_loss.item()
             metrics["action_loss"] = action_loss.item()
+            if not torch.isnan(state_loss_masked):
+                metrics["state_loss_masked"] = state_loss_masked.item()
             if action_acc is not None and not torch.isnan(action_acc):
                 metrics["action_acc"] = action_acc.item()
             if action_acc_all_valid is not None and not torch.isnan(action_acc_all_valid):
@@ -1296,6 +1361,11 @@ class MaskedDPMultimodalAgent:
             if action_acc is not None and not torch.isnan(action_acc):
                 metrics[f"by_mr/action_acc_mr{mr_key}"] = action_acc.item()
 
+            if grad_ratio_state_over_action is not None:
+                metrics["grad_norm_state_trunk"] = grad_norm_state_trunk
+                metrics["grad_norm_action_trunk"] = grad_norm_action_trunk
+                metrics["grad_ratio_state_over_action"] = grad_ratio_state_over_action
+
         return metrics
 
     def eval_validation(self, val_iter, step=None):
@@ -1306,9 +1376,16 @@ class MaskedDPMultimodalAgent:
         mask_ratio = np.random.choice(self.mask_ratio)
         x_fused, mask, ids_restore, ids_keep = \
             self.model.forward_encoder(obs, action, mask_ratio, valid_mask=valid_mask)
-        
+
+        valid_il = None
+        if valid_mask is not None:
+            v = valid_mask.to(device=obs.device, dtype=torch.bool)
+            if v.dim() == 3 and v.size(-1) == 1:
+                v = v.squeeze(-1)                          # [B, T, 1] -> [B, T]
+            valid_il = v.repeat_interleave(2, dim=1)        # [B, 2T]
+
         pred_s, pred_a = self.model.forward_decoder(
-            x_fused, ids_restore
+            x_fused, ids_restore, valid_il=valid_il
         )
 
         # Build the state/recon target exactly like update_mdp.
@@ -1318,7 +1395,7 @@ class MaskedDPMultimodalAgent:
         with torch.no_grad():
             target_s = self.model._make_state_target(obs)
 
-        mask_loss, state_loss, action_loss, action_acc, action_acc_all_valid = self.model.forward_loss(
+        mask_loss, state_loss, action_loss, action_acc, action_acc_all_valid, state_loss_masked = self.model.forward_loss(
             target_s, action, pred_s, pred_a, mask, valid_mask=valid_mask
         )
 
@@ -1326,6 +1403,8 @@ class MaskedDPMultimodalAgent:
             metrics["val_mask_loss"] = mask_loss.item()
             metrics["val_state_loss"] = state_loss.item()
             metrics["val_action_loss"] = action_loss.item()
+            if not torch.isnan(state_loss_masked):
+                metrics["val_state_loss_masked"] = state_loss_masked.item()
             if action_acc is not None and not torch.isnan(action_acc):
                 metrics["val_action_acc"] = action_acc.item()
             if action_acc_all_valid is not None and not torch.isnan(action_acc_all_valid):

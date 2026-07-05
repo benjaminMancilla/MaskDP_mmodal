@@ -383,8 +383,8 @@ class CoAttentionBlockSharedMLP(nn.Module):
 
     def forward(self, x_s, x_a, mask_s=None, mask_a=None):
         # Cross-attention (parallel, same as CoAttentionBlock)
-        delta_s = self.cross_attn_s(self.ln1_s(x_s), self.ln1_a(x_a))
-        delta_a = self.cross_attn_a(self.ln1_a(x_a), self.ln1_s(x_s))
+        delta_s = self.cross_attn_s(self.ln1_s(x_s), self.ln1_a(x_a), key_padding_mask=mask_a)
+        delta_a = self.cross_attn_a(self.ln1_a(x_a), self.ln1_s(x_s), key_padding_mask=mask_s)
         x_s = x_s + delta_s
         x_a = x_a + delta_a
 

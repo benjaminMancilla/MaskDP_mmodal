@@ -73,7 +73,8 @@ transformer_cfg:
   discrete_actions: true      # nn.Embedding + cross-entropy instead of nn.Linear + MSE/Tanh
   num_actions: 15             # action space size (for Procgen is [0,..,14])
                                 
-  action_loss_weight: 1.0     # lambda for balancing MSE(state) vs CE(action) in the total loss.
+  action_loss_weight: 0.03     # lambda for balancing MSE(state) vs CE(action) in the total loss.
+  use_decoder_valid_mask: true # neutralizes padding tokens with mask tokens and blocks attention by a block-diagonal mask
 
 train_mode: 'joint'           # 'joint' | 'state_only' | 'action_only'
 
