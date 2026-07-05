@@ -150,7 +150,9 @@ class BCTEvalAgentMultimodal:
         ids_shuffle = torch.cat([ids_keep[0], masked_positions], dim=0)
         ids_restore = torch.argsort(ids_shuffle).unsqueeze(0)
 
-        _, pred_a = self.mdp.forward_decoder(x_fused, ids_restore)   # (1, K, num_actions) logits
+        # valid_il=None: closed-loop has no concept of padding. Every position
+        # after the current one is legitimate future not yet observed.
+        _, pred_a = self.mdp.forward_decoder(x_fused, ids_restore, valid_il=None)   # (1, K, num_actions) logits
         return pred_a[0]                                             # (K, num_actions)
 
     def act(self, obs):
