@@ -61,7 +61,7 @@ class mySequential(nn.Sequential):
                 raise NotImplementedError
                 # inputs = module(inputs)
         return inputs
-    
+
 
 
 class CrossAttention(nn.Module):
@@ -292,46 +292,3 @@ class TwinQ(nn.Module):
         q_2 = self.q2(self.ln_f(x2))
         return q_1, q_2
 
-class CoAttentionBlockSharedMLP(nn.Module):
-    """
-    Co-Attentional block with a single shared MLP across both streams.
-    Halves the MLP parameter cost vs CoAttentionBlock while keeping
-    full cross-attention capacity.
-    
-    Params: ~CoAttn(d, r) / 2 on the MLP side
-    At d=256, r=4: ~1,054K vs 1,579K (standard) -- matches CoAttn(224, r=2)
-    """
-    def __init__(self, config):
-        super().__init__()
-        mlp_ratio = float(getattr(config, "fusion_mlp_ratio", 4.0))
-        hidden_dim = int(mlp_ratio * config.n_embd)
-        mlp_pdrop = getattr(config, "mlp_pdrop", 0.0)
-
-        # Cross-attention streams (identical to CoAttentionBlock)
-        self.ln1_s = nn.LayerNorm(config.n_embd)
-        self.cross_attn_s = CrossAttention(config)  # Q=S, K/V=A
-        self.ln1_a = nn.LayerNorm(config.n_embd)
-        self.cross_attn_a = CrossAttention(config)  # Q=A, K/V=S
-
-        # Single shared MLP + norm (applied to both streams)
-        self.ln2 = nn.LayerNorm(config.n_embd)
-        self.mlp = nn.Sequential(
-            nn.Linear(config.n_embd, hidden_dim),
-            nn.GELU(),
-            nn.Dropout(mlp_pdrop),
-            nn.Linear(hidden_dim, config.n_embd),
-            nn.Dropout(config.resid_pdrop),
-        )
-
-    def forward(self, x_s, x_a, mask_s=None, mask_a=None):
-        # Cross-attention (parallel, same as CoAttentionBlock)
-        delta_s = self.cross_attn_s(self.ln1_s(x_s), self.ln1_a(x_a), key_padding_mask=mask_a)
-        delta_a = self.cross_attn_a(self.ln1_a(x_a), self.ln1_s(x_s), key_padding_mask=mask_s)
-        x_s = x_s + delta_s
-        x_a = x_a + delta_a
-
-        # Shared MLP applied independently to each stream
-        x_s = x_s + self.mlp(self.ln2(x_s))
-        x_a = x_a + self.mlp(self.ln2(x_a))
-
-        return x_s, x_a

@@ -10,7 +10,7 @@ from collections import OrderedDict
 import utils
 from dm_control.utils import rewards
 from einops import rearrange, reduce, repeat
-from agent.modules.attention import Block, CausalSelfAttention, CoAttentionBlock, AdapterMLP, CoAttentionBlockSharedMLP
+from agent.modules.attention import Block, CausalSelfAttention, CoAttentionBlock, AdapterMLP
 from agent.modules.pixel_encoder import PixelEncoder
 from agent.modules.load_pretrained_encoder import load_drqbc_convnet, load_procgen_impala
 from agent.modules.pixel_recon_decoder import PixelReconDecoder
@@ -251,10 +251,6 @@ class MaskedDPMultimodal(nn.Module):
             self.fusion_blocks = nn.ModuleList(
                 [CoAttentionBlock(config) for _ in range(self.n_fuse_layer)]
             )
-        elif self.fusion_type == 'cross_shared':
-            self.fusion_blocks = nn.ModuleList(
-                [CoAttentionBlockSharedMLP(config) for _ in range(self.n_fuse_layer)]
-            )
         else:
             self.fusion_blocks = nn.ModuleList(
                 [Block(config) for _ in range(self.n_fuse_layer)]
@@ -399,12 +395,6 @@ class MaskedDPMultimodal(nn.Module):
                 nn.init.zeros_(blk.cross_attn_a.proj.bias)
                 zero_init_last_linear(blk.mlp_a)  
                               
-            elif isinstance(blk, CoAttentionBlockSharedMLP):
-                nn.init.zeros_(blk.cross_attn_s.proj.weight)
-                nn.init.zeros_(blk.cross_attn_s.proj.bias)
-                nn.init.zeros_(blk.cross_attn_a.proj.weight)
-                nn.init.zeros_(blk.cross_attn_a.proj.bias)
-                zero_init_last_linear(blk.mlp)
                 
             else:
                 nn.init.zeros_(blk.attn.proj.weight)
@@ -548,7 +538,7 @@ class MaskedDPMultimodal(nn.Module):
         """
  
         # --- CROSS ATTENTION ---       
-        if self.fusion_type in ('cross', 'cross_shared'):
+        if self.fusion_type == 'cross':
             x_s = s_encoded
             x_a = a_encoded
 
