@@ -122,7 +122,6 @@ class BCTEvalAgentMultimodal:
             x_s = blk(x_s, s_attn)
         x_s = self.mdp.state_encoder_norm(x_s)
         x_s = self.mdp.state_proj(x_s)
-        x_s = self.mdp.state_adapter(x_s)
 
         if n_a > 0:
             a_attn = torch.ones(1, 1, n_a, n_a, device=self.device)
@@ -131,7 +130,6 @@ class BCTEvalAgentMultimodal:
                 x_a = blk(x_a, a_attn)
             x_a = self.mdp.action_encoder_norm(x_a)
             x_a = self.mdp.action_proj(x_a)
-            x_a = self.mdp.action_adapter(x_a)
         else:
             x_a = x_s.new_empty(1, 0, D)
 
