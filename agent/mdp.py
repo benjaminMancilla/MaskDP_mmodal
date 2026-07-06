@@ -10,7 +10,7 @@ from collections import OrderedDict
 import utils
 from dm_control.utils import rewards
 from einops import rearrange, reduce, repeat
-from agent.modules.attention import Block, CausalSelfAttention, CoAttentionBlock, AdapterMLP
+from agent.modules.attention import Block, CausalSelfAttention, CoAttentionBlock
 from agent.modules.pixel_encoder import PixelEncoder
 from agent.modules.load_pretrained_encoder import load_drqbc_convnet, load_procgen_impala
 from agent.modules.pixel_recon_decoder import PixelReconDecoder
@@ -218,21 +218,6 @@ class MaskedDPMultimodal(nn.Module):
         if self._has_enc_proj:
             self.enc_mask_token = nn.Parameter(torch.zeros(1, 1, self.enc_n_embd))
 
-        # --------------------------------------------------------------------------
-        # Optional MLP adapter — sits between encoder norms and fusion neck.
-        # When use_adapter_mlp=False both adapters are nn.Identity() (zero overhead).
-        self.use_adapter_mlp = bool(getattr(config, "use_adapter_mlp", False))
-        if self.use_adapter_mlp:
-            _ratio     = int(getattr(config, "adapter_mlp_ratio",    2))
-            _layers    = int(getattr(config, "adapter_mlp_layers",   2))
-            _norm      = bool(getattr(config, "adapter_mlp_norm",    True))
-            _residual  = bool(getattr(config, "adapter_mlp_residual", True))
-            print(f"AdapterMLP ENABLED — ratio={_ratio}, layers={_layers}, norm={_norm}, residual={_residual}")
-            self.state_adapter  = AdapterMLP(self.n_embd, _ratio, _layers, _norm, _residual)
-            self.action_adapter = AdapterMLP(self.n_embd, _ratio, _layers, _norm, _residual)
-        else:
-            self.state_adapter  = nn.Identity()
-            self.action_adapter = nn.Identity()
 
         # --------------------------------------------------------------------------
         # Fusion encoder (cross-modal interaction after separate encoders, before decoder)
@@ -779,9 +764,6 @@ class MaskedDPMultimodal(nn.Module):
         s_encoded = self.state_proj(s_encoded)            # [B, Ls, n_embd]
         a_encoded = self.action_proj(a_encoded)            # [B, La, n_embd]
 
-        # Optional adapter — identity when use_adapter_mlp=False
-        s_encoded = self.state_adapter(s_encoded)
-        a_encoded = self.action_adapter(a_encoded)
         
         # Fuse and return kept tokens for the decoder
         x_fused = self.forward_fusion(

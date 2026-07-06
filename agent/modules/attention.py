@@ -7,49 +7,6 @@ from torch.nn import functional as F
 
 logger = logging.getLogger(__name__)
 
-class AdapterMLP(nn.Module):
-    """
-    Token-wise MLP adapter placed between the unimodal encoder and the fusion neck.
-    Serves as a learnable bridge when loading frozen pretrained unimodal weights into
-    a multimodal model. Always trainable regardless of the freeze schedule on encoders.
-    """
- 
-    def __init__(
-        self,
-        n_embd: int,
-        ratio: int,
-        n_layers: int,
-        use_norm: bool,
-        use_residual: bool,
-        resid_pdrop: float = 0.0,
-    ):
-        super().__init__()
-        assert n_layers >= 2, "AdapterMLP requires at least 2 layers (expand + project)"
-        hidden_dim = n_embd * ratio
- 
-        # Pre-norm, consistent with Block's ln2
-        self.norm = nn.LayerNorm(n_embd) if use_norm else nn.Identity()
-        self.use_residual = use_residual
- 
-        # Build MLP: expand -> [optional hidden layers] -> project -> dropout
-        layers = [nn.Linear(n_embd, hidden_dim), nn.GELU()]
-        for _ in range(n_layers - 2):
-            layers += [nn.Linear(hidden_dim, hidden_dim), nn.GELU()]
-        layers += [nn.Linear(hidden_dim, n_embd), nn.Dropout(resid_pdrop)]
-        self.mlp = nn.Sequential(*layers)
- 
-        # Zero-init output projection → identity at init
-        # mlp[-2] is the last Linear (mlp[-1] is Dropout)
-        nn.init.zeros_(self.mlp[-2].weight)
-        nn.init.zeros_(self.mlp[-2].bias)
- 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x: [B, L, n_embd] — applied token-wise, no cross-token interaction
-        # Pattern mirrors Block's FFN sublayer: x = x + mlp(ln(x))
-        out = self.mlp(self.norm(x))
-        if self.use_residual:
-            out = x + out
-        return out
 
 
 class mySequential(nn.Sequential):
