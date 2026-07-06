@@ -32,7 +32,7 @@ class ReconstructionEvalAgent:
                         MSE between predicted and ground-truth actions at masked positions.
                     Discrete actions (discrete_actions=True, e.g. Procgen):
                         Top-1 accuracy between argmax(logits) and ground-truth action id
-                        at masked positions.
+                        at masked positions, PLUS the complementary "action_recon_nll"
         "states"  : MSE between predicted and L2-normalised CNN features at masked positions.
                     Target = pixel_encoder(s) / ||pixel_encoder(s)||_2, identical to
                     the normalisation used in forward_loss during training.
@@ -467,6 +467,31 @@ class ReconstructionEvalAgent:
 
         return float(correct.mean()), correct, masked_indices
 
+    def _compute_episode_action_nll(
+        self,
+        pred_logits: np.ndarray,
+        target: np.ndarray,
+        mask: np.ndarray,
+    ) -> Tuple:
+        masked_indices = np.where(mask)[0]
+        if len(masked_indices) == 0:
+            return None, None, None
+
+        target_arr = np.asarray(target)
+        if target_arr.ndim == 2 and target_arr.shape[-1] == 1:
+            target_arr = target_arr[:, 0]
+
+        pred_masked   = pred_logits[masked_indices].astype(np.float64)  # (n_m, num_actions)
+        target_masked = target_arr[masked_indices].astype(np.int64)     # (n_m,)
+
+        # log_softmax(logits)[target] = logits[target] - logsumexp(logits)
+        max_logits   = pred_masked.max(axis=-1, keepdims=True)
+        log_sum_exp  = max_logits[:, 0] + np.log(np.exp(pred_masked - max_logits).sum(axis=-1))
+        true_logit   = pred_masked[np.arange(len(target_masked)), target_masked]
+        nll_per_token = log_sum_exp - true_logit                        # (n_m,) nats, >= 0
+
+        return float(nll_per_token.mean()), nll_per_token, masked_indices
+
     def _aggregate_metrics(
         self,
         episode_losses: List[float],
@@ -516,6 +541,12 @@ class ReconstructionEvalAgent:
         pos_mse_sum   = np.zeros(self.T, dtype=np.float64)
         pos_mse_count = np.zeros(self.T, dtype=np.int64)
 
+        # NLL is the complementary metric to accuracy, only meaningful (and only
+        # computed) when the action metric is accuracy in the first place.
+        nll_losses    = []
+        nll_pos_sum   = np.zeros(self.T, dtype=np.float64)
+        nll_pos_count = np.zeros(self.T, dtype=np.int64)
+
         for ep_idx in range(num_eval_episodes):
             states_np, actions_np, valid_t = self._sample_window(val_episodes)
 
@@ -546,7 +577,20 @@ class ReconstructionEvalAgent:
                 pos_mse_sum[pos]   += per_token[local_i]
                 pos_mse_count[pos] += 1
 
-        return self._aggregate_metrics(episode_losses, pos_mse_sum, pos_mse_count, prefix)
+            if use_accuracy:
+                ep_nll, nll_per_token, nll_idx = \
+                    self._compute_episode_action_nll(pred, target, mask)
+                nll_losses.append(ep_nll)
+                for local_i, pos in enumerate(nll_idx):
+                    nll_pos_sum[pos]   += nll_per_token[local_i]
+                    nll_pos_count[pos] += 1
+
+        metrics = self._aggregate_metrics(episode_losses, pos_mse_sum, pos_mse_count, prefix)
+        if use_accuracy:
+            metrics.update(
+                self._aggregate_metrics(nll_losses, nll_pos_sum, nll_pos_count, "action_recon_nll")
+            )
+        return metrics
 
 
     # Both-modality evaluation (single forward pass per episode)
@@ -563,6 +607,10 @@ class ReconstructionEvalAgent:
         s_pos_count = np.zeros(self.T, dtype=np.int64)
 
         a_prefix = "action_recon_acc" if self.discrete_actions else "action_recon_loss"
+
+        nll_losses    = []
+        nll_pos_sum   = np.zeros(self.T, dtype=np.float64)
+        nll_pos_count = np.zeros(self.T, dtype=np.int64)
 
         for ep_idx in range(num_eval_episodes):
             states_np, actions_np, valid_t = self._sample_window(val_episodes)
@@ -584,6 +632,14 @@ class ReconstructionEvalAgent:
                     a_pos_sum[pos]   += val_a[local_i]
                     a_pos_count[pos] += 1
 
+                if self.discrete_actions:
+                    ep_nll, nll_per_token, nll_idx = \
+                        self._compute_episode_action_nll(pred_a, actions_np, action_mask)
+                    nll_losses.append(ep_nll)
+                    for local_i, pos in enumerate(nll_idx):
+                        nll_pos_sum[pos]   += nll_per_token[local_i]
+                        nll_pos_count[pos] += 1
+
             # States
             ep_s, mse_s, idx_s = self._compute_episode_mse(pred_s, state_target, state_mask)
             if ep_s is not None:
@@ -593,6 +649,10 @@ class ReconstructionEvalAgent:
                     s_pos_count[pos] += 1
 
         metrics_a = self._aggregate_metrics(a_losses, a_pos_sum, a_pos_count, a_prefix)
+        if self.discrete_actions:
+            metrics_a.update(
+                self._aggregate_metrics(nll_losses, nll_pos_sum, nll_pos_count, "action_recon_nll")
+            )
         metrics_s = self._aggregate_metrics(s_losses, s_pos_sum, s_pos_count, "state_recon_loss")
 
         if self.discrete_actions:

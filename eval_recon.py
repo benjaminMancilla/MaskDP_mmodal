@@ -84,11 +84,22 @@ def _infer_action_shape(episodes: List[Dict]) -> Tuple[int]:
     return (action.shape[1],)
 
 
-def _metric_prefix(metrics: Dict) -> str:
+def _metric_prefixes(metrics: Dict) -> List[str]:
+    prefixes = []
     for k in metrics:
         if k.endswith("/mean"):
-            return k[: -len("/mean")]
-    return "recon"  # degenerate: no masked tokens in any episode
+            prefix = k[: -len("/mean")]
+            if prefix not in prefixes:
+                prefixes.append(prefix)
+    return prefixes or ["recon"]  # degenerate: no masked tokens in any episode
+
+
+_WANDB_SHORT_NAMES = {
+    "action_recon_acc":  "action_acc",
+    "action_recon_loss": "action_mse",
+    "action_recon_nll":  "action_nll",
+    "state_recon_loss":  "state_mse",
+}
 
 
 def _log_modality_to_wandb(
@@ -103,19 +114,15 @@ def _log_modality_to_wandb(
     Scalar metrics are logged directly. by_position is logged as one scalar
     per timestep so curves can be overlaid across models in W&B.
     """
-    metric_kind = _metric_prefix(metrics)  # e.g. "action_recon_acc"
     log_data = {"eval/snapshot_step": global_step}
 
     for k, v in metrics.items():
         if k.endswith("/by_position"):
-            # e.g. action_recon_acc/by_position -> eval/action_acc_t000 … t063
-            #      action_recon_loss/by_position -> eval/action_mse_t000 … t063
-            if "acc" in metric_kind:
-                short = "action_acc"
-            elif "action" in metric_kind:
-                short = "action_mse"
-            else:
-                short = "state_mse"
+            # e.g. action_recon_acc/by_position  -> eval/action_acc_t000 … t063
+            #      action_recon_nll/by_position   -> eval/action_nll_t000 … t063
+            #      action_recon_loss/by_position  -> eval/action_mse_t000 … t063
+            metric_kind = k[: -len("/by_position")]
+            short = _WANDB_SHORT_NAMES.get(metric_kind, metric_kind)
             for t, val in enumerate(v):
                 log_data[f"{prefix}/{short}_t{t:03d}"] = float(val)
         else:
@@ -125,25 +132,26 @@ def _log_modality_to_wandb(
 
 
 def _print_modality(metrics: Dict) -> None:
-    label = _metric_prefix(metrics)
-    is_acc = "acc" in label
-    unit = "accuracy" if is_acc else "MSE"
+    for label in _metric_prefixes(metrics):
+        is_acc = "acc" in label
+        is_nll = "nll" in label
+        unit = "accuracy" if is_acc else ("nats" if is_nll else "MSE")
 
-    mean = metrics.get(f"{label}/mean", float("nan"))
-    std  = metrics.get(f"{label}/std",  float("nan"))
-    by_pos = metrics.get(f"{label}/by_position", [])
-    if is_acc:
-        vals = [v for v in by_pos]
-    else:
-        vals = [v for v in by_pos if v > 0.0]
+        mean = metrics.get(f"{label}/mean", float("nan"))
+        std  = metrics.get(f"{label}/std",  float("nan"))
+        by_pos = metrics.get(f"{label}/by_position", [])
+        if is_acc:
+            vals = [v for v in by_pos]
+        else:
+            vals = [v for v in by_pos if v > 0.0]
 
-    print(
-        f"  {label} [{unit}] | "
-        f"mean={mean:.6f}  std={std:.6f}  "
-        f"(masked: min={min(vals):.6f}  max={max(vals):.6f})"
-        if vals else
-        f"  {label} [{unit}] | mean={mean:.6f}  std={std:.6f}"
-    )
+        print(
+            f"  {label} [{unit}] | "
+            f"mean={mean:.6f}  std={std:.6f}  "
+            f"(masked: min={min(vals):.6f}  max={max(vals):.6f})"
+            if vals else
+            f"  {label} [{unit}] | mean={mean:.6f}  std={std:.6f}"
+        )
 
 
 def _init_wandb_run(project: str, exp_name: str, cfg) -> wandb.sdk.wandb_run.Run:
