@@ -40,10 +40,9 @@ class MaskedDPMultimodal(nn.Module):
             return torch.zeros(batch_size, T, d.H, d.W, d.C, device=device)
         return torch.zeros(batch_size, T, self.state_pred_dim, device=device)
 
-    def __init__(self, obs_dim, action_dim, config, train_mode='joint'):
+    def __init__(self, obs_dim, action_dim, config):
         super().__init__()
         # Pretrain configuration
-        self.train_mode = train_mode  # 'joint', 'state_only', 'action_only'
         
         self.obs_dim = obs_dim
         self.action_dim = action_dim
@@ -326,10 +325,6 @@ class MaskedDPMultimodal(nn.Module):
         # --------------------------------------------------------------------------
         self.initialize_weights()
         
-        if self.train_mode != 'joint':
-            # Unimodal case, force fusion_type='none' and n_fuse_layer=0
-            assert self.fusion_type == 'none' or self.n_fuse_layer == 0, \
-                f"Error: Modo '{self.train_mode}' requiere fusion_type='none'. Recibido: {self.fusion_type}"
 
     def initialize_weights(self):
         # Positional embeddings SHOULD NOT be separated, this actually breaks the
@@ -598,18 +593,6 @@ class MaskedDPMultimodal(nn.Module):
 
     def forward_encoder(self, states, actions, mask_ratio, valid_mask=None):
         """MAE-style encoder with separate state and action streams."""
-
-        # Input sanitization according to training mode
-        if self.train_mode == 'state_only':
-            if self.discrete_actions:
-                # Safe regardless of value: the action loss for this mode is
-                # zeroed out in forward_loss, so no gradient flows through it.
-                actions = torch.zeros_like(actions)
-            else:
-                actions = torch.full_like(actions, self.pad_value)
-        elif self.train_mode == 'action_only':
-            states = torch.full_like(states, self.pad_value)
-
         batch_size, T = states.shape[0], states.shape[1]
         
         # Embeddings
@@ -823,51 +806,23 @@ class MaskedDPMultimodal(nn.Module):
         else:
             dec_attn_mask = self.attn_mask
         
-        if self.train_mode == 'state_only':
-            s = self.decoder_state_embed(x[:, ::2])
-            x_dec = torch.zeros(batch_size, total_len, self.dec_n_embd, device=x.device)
-            x_dec[:, ::2] = s
-            x_dec = x_dec + self.decoder_pos_embed[:, :total_len, :]
-
-            for blk in self.decoder_blocks:
-                x_dec = blk(x_dec, dec_attn_mask)
-
-            # dummy for actions
-            s_pred = self._predict_state(x_dec[:, ::2])
-            a_dim_out = self.num_actions if self.discrete_actions else self.action_dim
-            a_pred = torch.zeros(batch_size, total_len // 2, a_dim_out, device=x.device)
+        # Project to decoder embedding space
+        s = self.decoder_state_embed(x[:, ::2])
+        a = self.decoder_action_embed(x[:, 1::2])
         
-        elif self.train_mode == 'action_only':
-            a = self.decoder_action_embed(x[:, 1::2])
-            x_dec = torch.zeros(batch_size, total_len, self.dec_n_embd, device=x.device)
-            x_dec[:, 1::2] = a
-            x_dec = x_dec + self.decoder_pos_embed[:, :total_len, :]
-
-            for blk in self.decoder_blocks:
-                x_dec = blk(x_dec, dec_attn_mask)
-
-            # dummy for states
-            a_pred = self.action_head(x_dec[:, 1::2])
-            s_pred = self._zero_state_pred(batch_size, total_len // 2, x.device)
+        # Interleave actions and states for the decoder
+        x = torch.stack([s, a], dim=2).reshape(batch_size, total_len, self.dec_n_embd)
         
-        else:  # 'joint'
-            # Project to decoder embedding space
-            s = self.decoder_state_embed(x[:, ::2])
-            a = self.decoder_action_embed(x[:, 1::2])
-            
-            # Interleave actions and states for the decoder
-            x = torch.stack([s, a], dim=2).reshape(batch_size, total_len, self.dec_n_embd)
-            
-            # Add positional embeddings
-            x = x + self.decoder_pos_embed[:, :x.shape[1], :]
-            
-            # Apply Transformer blocks
-            for blk in self.decoder_blocks:
-                x = blk(x, dec_attn_mask)
-            
-            # Split and predict
-            s_pred = self._predict_state(x[:, ::2])
-            a_pred = self.action_head(x[:, 1::2])
+        # Add positional embeddings
+        x = x + self.decoder_pos_embed[:, :x.shape[1], :]
+        
+        # Apply Transformer blocks
+        for blk in self.decoder_blocks:
+            x = blk(x, dec_attn_mask)
+        
+        # Split and predict
+        s_pred = self._predict_state(x[:, ::2])
+        a_pred = self.action_head(x[:, 1::2])
         
         return s_pred, a_pred
 
@@ -916,10 +871,6 @@ class MaskedDPMultimodal(nn.Module):
             loss_a = (pred_a - target_a) ** 2
             loss_a_t = loss_a.mean(dim=-1)                 # [B, T]
 
-        if self.train_mode == 'state_only':
-            loss_a_t = torch.zeros_like(loss_a_t)
-        elif self.train_mode == 'action_only':
-            loss_s_t = torch.zeros_like(loss_s_t)
 
         if valid_mask is not None:
             v_t = valid_mask.to(device=loss_s_t.device, dtype=loss_s_t.dtype)
@@ -982,7 +933,6 @@ class MaskedDPMultimodalAgent:
         mask_ratio,
         transformer_cfg,
         freeze_schedule=None,
-        train_mode='joint',
         finetune_lr=None,
     ):
         self.action_dim = action_shape[0]
@@ -1004,7 +954,6 @@ class MaskedDPMultimodalAgent:
             obs_shape[0], 
             action_shape[0], 
             transformer_cfg,
-            train_mode=train_mode
         ).to(device)
         self.mask_ratio = mask_ratio
         # optimizers

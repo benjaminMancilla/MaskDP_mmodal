@@ -176,7 +176,6 @@ def main(cfg):
         cfg.agent,
         obs_shape=obs_shape,
         action_shape=action_shape,
-        train_mode=cfg.agent.train_mode,
     )
     
     if cfg.get("finetune_from", None):
