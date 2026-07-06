@@ -983,7 +983,6 @@ class MaskedDPMultimodalAgent:
         transformer_cfg,
         freeze_schedule=None,
         train_mode='joint',
-        warmup_steps=0,
         finetune_lr=None,
     ):
         self.action_dim = action_shape[0]
@@ -999,13 +998,6 @@ class MaskedDPMultimodalAgent:
         # Schedule {'module_nane': [start_step, end_step]}
         self.freeze_schedule = freeze_schedule if freeze_schedule is not None else {}
 
-        # Warmup logic
-        if warmup_steps > 0:
-            self.warmup_steps = math.ceil(warmup_steps / 1000.0) * 1000
-            print(f"Warmup ENABLED: Requested {warmup_steps} -> Adjusted to {self.warmup_steps} steps")
-        else:
-            self.warmup_steps = 0
-        self.warmup_start_step = None
 
         # models
         self.model = MaskedDPMultimodal(
@@ -1096,20 +1088,20 @@ class MaskedDPMultimodalAgent:
 
         param_groups = []
         if other_decay:
-            param_groups.append({'params': other_decay, 'lr': self.lr, 'target_lr': self.lr,
+            param_groups.append({'params': other_decay, 'lr': self.lr,
                                 'weight_decay': self.weight_decay, 'name': 'fusion_decoder_decay'})
         if other_no_decay:
-            param_groups.append({'params': other_no_decay, 'lr': self.lr, 'target_lr': self.lr,
+            param_groups.append({'params': other_no_decay, 'lr': self.lr,
                                 'weight_decay': 0.0, 'name': 'fusion_decoder_no_decay'})
         if encoder_decay:
-            param_groups.append({'params': encoder_decay, 'lr': self.finetune_lr, 'target_lr': self.finetune_lr,
+            param_groups.append({'params': encoder_decay, 'lr': self.finetune_lr,
                                 'weight_decay': self.weight_decay, 'name': 'encoders_decay'})
         if encoder_no_decay:
-            param_groups.append({'params': encoder_no_decay, 'lr': self.finetune_lr, 'target_lr': self.finetune_lr,
+            param_groups.append({'params': encoder_no_decay, 'lr': self.finetune_lr,
                                 'weight_decay': 0.0, 'name': 'encoders_no_decay'})
 
         if not param_groups:
-            param_groups = [{'params': [], 'lr': self.lr, 'target_lr': self.lr,
+            param_groups = [{'params': [], 'lr': self.lr,
                             'weight_decay': self.weight_decay, 'name': 'empty'}]
 
         stats = (len(other_decay), len(other_no_decay), len(encoder_decay), len(encoder_no_decay))
@@ -1166,7 +1158,6 @@ class MaskedDPMultimodalAgent:
             self.opt.add_param_group({
                 'params': new_decay,
                 'lr': self.finetune_lr,
-                'target_lr': self.finetune_lr,
                 'weight_decay': self.weight_decay,
                 'name': 'encoders_decay',
             })
@@ -1174,7 +1165,6 @@ class MaskedDPMultimodalAgent:
             self.opt.add_param_group({
                 'params': new_no_decay,
                 'lr': self.finetune_lr,
-                'target_lr': self.finetune_lr,
                 'weight_decay': 0.0,
                 'name': 'encoders_no_decay',
             })
@@ -1243,31 +1233,6 @@ class MaskedDPMultimodalAgent:
         """
         self.check_freeze_schedule(step)
         
-        # Warmup Logic
-        # Each param_group carries a 'target_lr' key. Warmup scales each group
-        # relative to its own target, so fusion/decoder (lr=1e-4) and encoders
-        # (lr=5e-5) both warm up proportionally — not to a single shared value.
-        # Warmup only fires once (anchored to warmup_start_step), so encoder
-        # params added via add_param_group after the warmup window has elapsed
-        # will correctly start at their full finetune_lr with no warmup applied.
-        if step is not None and self.warmup_steps > 0:
-            if self.warmup_start_step is None:
-                self.warmup_start_step = step
-            
-            steps_since_start = step - self.warmup_start_step
-            
-            if steps_since_start < self.warmup_steps:
-                # Linear warmup: scale each group by the same factor, but relative
-                # to that group's own target_lr (not a single global self.lr).
-                warmup_factor = (steps_since_start + 1) / float(self.warmup_steps)
-                for param_group in self.opt.param_groups:
-                    target = param_group.get('target_lr', self.lr)
-                    param_group['lr'] = target * warmup_factor
-            
-            elif steps_since_start == self.warmup_steps:
-                # Snap each group to its exact target_lr at the end of warmup
-                for param_group in self.opt.param_groups:
-                    param_group['lr'] = param_group.get('target_lr', self.lr)
 
         metrics = dict()
         mask_ratio = np.random.choice(self.mask_ratio)
