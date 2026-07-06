@@ -143,9 +143,6 @@ class ReconstructionEvalAgent:
             obs_shape[0], action_shape[0], self.config
         ).to(device)
 
-        assert not self.mdp.use_early_fusion, (
-            "Early fusion is a legacy option that is not supported"
-        )
 
         if path is not None:
             self.mdp.load_state_dict(payload["model"])
@@ -353,7 +350,6 @@ class ReconstructionEvalAgent:
                 x_s = blk(x_s, s_attn)
             x_s = self.mdp.state_encoder_norm(x_s)   # (1, n_s, enc_D)
             x_s = self.mdp.state_proj(x_s)            # (1, n_s, D)
-            x_s = self.mdp.state_adapter(x_s)         # (1, n_s, D)
         else:
             x_s = torch.zeros(1, 0, D, device=device)
 
@@ -363,7 +359,6 @@ class ReconstructionEvalAgent:
                 x_a = blk(x_a, a_attn)
             x_a = self.mdp.action_encoder_norm(x_a)   # (1, n_a, enc_D)
             x_a = self.mdp.action_proj(x_a)            # (1, n_a, D)
-            x_a = self.mdp.action_adapter(x_a)         # (1, n_a, D)
         else:
             x_a = torch.zeros(1, 0, D, device=device)
 
