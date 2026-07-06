@@ -53,6 +53,10 @@ class MaskedDPMultimodal(nn.Module):
         self.num_actions = int(getattr(config, "num_actions", 0))
         # Lambda to rebalance MSE(state) vs CE(action)
         self.action_loss_weight = float(getattr(config, "action_loss_weight", 1.0))
+        # Label smoothing for the action CE loss ONLY
+        self.label_smoothing = float(getattr(config, "label_smoothing", 0.0))
+        # dropout on the CNN->transformer state features,
+        self.input_dropout = nn.Dropout(float(getattr(config, "input_dropout", 0.0)))
         if self.discrete_actions:
             assert self.num_actions > 0, "num_actions must be > 0 with discrete_actions=True"
             print(f"Discrete actions ENABLED: num_actions={self.num_actions}, action_loss_weight={self.action_loss_weight}")
@@ -382,38 +386,39 @@ class MaskedDPMultimodal(nn.Module):
         
         self.apply(self._init_weights)
         
+        # Dinamic last linear layer search
+        def zero_init_last_linear(module):
+            for m in reversed(list(module)):
+                if isinstance(m, nn.Linear):
+                    nn.init.zeros_(m.weight)
+                    if m.bias is not None:
+                        nn.init.zeros_(m.bias)
+                    break
+
         # Initialize FUSION with zeros to stabilize freezing training
-        # The initialization procedures depends on the fusion type
         for blk in self.fusion_blocks:
             if isinstance(blk, CoAttentionBlock):
                 # Init Stream S
                 nn.init.zeros_(blk.cross_attn_s.proj.weight)
                 nn.init.zeros_(blk.cross_attn_s.proj.bias)
-                nn.init.zeros_(blk.mlp_s[2].weight)
-                nn.init.zeros_(blk.mlp_s[2].bias)
+                zero_init_last_linear(blk.mlp_s)
 
                 # Init Stream A
                 nn.init.zeros_(blk.cross_attn_a.proj.weight)
                 nn.init.zeros_(blk.cross_attn_a.proj.bias)
-                nn.init.zeros_(blk.mlp_a[2].weight)
-                nn.init.zeros_(blk.mlp_a[2].bias)
+                zero_init_last_linear(blk.mlp_a)  
+                              
             elif isinstance(blk, CoAttentionBlockSharedMLP):
-                # Cross-attention output projections (same as CoAttentionBlock)
                 nn.init.zeros_(blk.cross_attn_s.proj.weight)
                 nn.init.zeros_(blk.cross_attn_s.proj.bias)
                 nn.init.zeros_(blk.cross_attn_a.proj.weight)
                 nn.init.zeros_(blk.cross_attn_a.proj.bias)
-                # Shared MLP output projection (index 2 = second Linear)
-                nn.init.zeros_(blk.mlp[2].weight)
-                nn.init.zeros_(blk.mlp[2].bias)
+                zero_init_last_linear(blk.mlp)
+                
             else:
-                # Zero-init Attention Output Projection
                 nn.init.zeros_(blk.attn.proj.weight)
                 nn.init.zeros_(blk.attn.proj.bias)
-
-                # Zero-init MLP Output Projection
-                nn.init.zeros_(blk.mlp[2].weight)
-                nn.init.zeros_(blk.mlp[2].bias)
+                zero_init_last_linear(blk.mlp)
 
         # Estable Early Fusion with zero init
         # Same strategy as the fusion block
@@ -658,6 +663,8 @@ class MaskedDPMultimodal(nn.Module):
         
         # Embeddings
         s_emb = self._embed_states(states)
+        # Optional input dropout on CNN/state features entering the transformer
+        s_emb = self.input_dropout(s_emb)
         if self.discrete_actions:
             a_idx = actions.long()
             if a_idx.dim() == 3 and a_idx.size(-1) == 1:
@@ -925,7 +932,8 @@ class MaskedDPMultimodal(nn.Module):
         
         return s_pred, a_pred
 
-    def forward_loss(self, target_s, target_a, pred_s, pred_a, mask, valid_mask=None):
+    def forward_loss(self, target_s, target_a, pred_s, pred_a, mask, valid_mask=None, label_smoothing=0.0):
+        # label_smoothing: applied ONLY to the action Cross-Entropy
         # Pixel-recon target/pred arrive as [B, T, H, W, C] (state_target='pixel').
         # Flatten to [B, T, H*W*C] so everything below (norm, MSE, masking) is
         # identical regardless of whether the state target is an embedding or a frame
@@ -963,6 +971,7 @@ class MaskedDPMultimodal(nn.Module):
                 pred_a.reshape(batch_size * T, A),
                 a_tgt.reshape(batch_size * T),
                 reduction='none',
+                label_smoothing=label_smoothing,
             ).reshape(batch_size, T)                       # [B, T] CE per token
         else:
             loss_a = (pred_a - target_a) ** 2
@@ -1044,6 +1053,9 @@ class MaskedDPMultimodalAgent:
         self.device = device
         self.use_tb = use_tb
         self.config = transformer_cfg
+        # Decoupled weight decay (AdamW). Applied only to the "decay" param
+        # group built by _classify_params (2D matrices; CNN always excluded).
+        self.weight_decay = float(getattr(self.config, "weight_decay", 0.1))
         
         # Schedule {'module_nane': [start_step, end_step]}
         self.freeze_schedule = freeze_schedule if freeze_schedule is not None else {}
@@ -1070,30 +1082,18 @@ class MaskedDPMultimodalAgent:
         else:
             encoder_param_ids = set()
 
-        encoder_params, other_params = [], []
-        for p in self.model.parameters():
-            if not p.requires_grad:
-                continue
-            if p.data_ptr() in encoder_param_ids:
-                encoder_params.append(p)
-            else:
-                other_params.append(p)
+        param_groups, (od_len, ond_len, ed_len, end_len) = self._build_param_groups(encoder_param_ids)
 
-        # Tag every group with target_lr so warmup logic works correctly
-        param_groups = []
-        if other_params:
-            param_groups.append({'params': other_params, 'lr': lr, 'target_lr': lr, 'name': 'all_params'})
-        if encoder_params:
-            param_groups.append({
-                'params': encoder_params, 'lr': self.finetune_lr, 'target_lr': self.finetune_lr,
-                'name': 'pixel_encoder',
-            })
-            print(f"[Optimizer] pixel_encoder: {len(encoder_params)} trainable param tensors "
-                  f"@ lr={self.finetune_lr} (separate group from the rest @ lr={lr})")
-        if not param_groups:
-            param_groups = [{'params': [], 'lr': lr, 'target_lr': lr, 'name': 'empty'}]
+        if end_len > 0:
+            print(f"[Optimizer] pixel_encoder: {end_len} trainable param tensors "
+                  f"@ lr={self.finetune_lr}, weight_decay=0.0 (separate group from the rest @ lr={self.lr})")
 
-        self.opt = torch.optim.Adam(param_groups)
+        print(f"[Optimizer] AdamW groups — "
+              f"all_params: {od_len} decay / {ond_len} no_decay "
+              f"(weight_decay={self.weight_decay}) | "
+              f"pixel_encoder: {ed_len} decay / {end_len} no_decay")
+
+        self.opt = torch.optim.AdamW(param_groups)
         print(
             "number of parameters: %e", sum(p.numel() for p in self.model.parameters())
         )
@@ -1103,6 +1103,78 @@ class MaskedDPMultimodalAgent:
     def set_module_requires_grad(self, module, requires_grad):
         for param in module.parameters():
             param.requires_grad = requires_grad
+
+    def _classify_params(self):
+        decay_modules = (nn.Linear, nn.Conv1d, nn.Conv2d, nn.Conv3d)
+        no_decay_modules = (nn.LayerNorm, nn.Embedding)
+
+        pixel_encoder_ids = set()
+        if self.model.pixel_encoder is not None:
+            pixel_encoder_ids = {p.data_ptr() for p in self.model.pixel_encoder.parameters()}
+
+        decay_ids, no_decay_ids = set(), set()
+        for _, module in self.model.named_modules():
+            for pn, p in module.named_parameters(recurse=False):
+                ptr = p.data_ptr()
+                if ptr in pixel_encoder_ids:
+                    no_decay_ids.add(ptr)
+                elif pn.endswith("bias"):
+                    no_decay_ids.add(ptr)
+                elif isinstance(module, no_decay_modules):
+                    no_decay_ids.add(ptr)
+                elif isinstance(module, decay_modules) and pn.endswith("weight"):
+                    decay_ids.add(ptr)
+                else:
+                    # Standalone nn.Parameter not owned by Linear/Conv/Norm/Embedding
+                    # (e.g. mask_token, enc_mask_token) -> embedding-like, no decay.
+                    no_decay_ids.add(ptr)
+
+        return decay_ids, no_decay_ids
+    
+    def _build_param_groups(self, encoder_ids):
+        """Método auxiliar para construir los grupos del optimizador sin duplicar código."""
+        decay_ids, no_decay_ids = self._classify_params()
+
+        encoder_decay, encoder_no_decay = [], []
+        other_decay, other_no_decay = [], []
+        
+        for p in self.model.parameters():
+            if not p.requires_grad:
+                continue
+            ptr = p.data_ptr()
+            is_encoder = ptr in encoder_ids
+            is_decay = ptr in decay_ids
+            
+            if is_encoder:
+                (encoder_decay if is_decay else encoder_no_decay).append(p)
+            else:
+                (other_decay if is_decay else other_no_decay).append(p)
+
+        assert not encoder_decay, (
+            "[Optimizer] Invariant violated: pixel_encoder (CNN) params must never "
+            "land in a weight-decay group. Check _classify_params()."
+        )
+
+        param_groups = []
+        if other_decay:
+            param_groups.append({'params': other_decay, 'lr': self.lr, 'target_lr': self.lr,
+                                'weight_decay': self.weight_decay, 'name': 'fusion_decoder_decay'})
+        if other_no_decay:
+            param_groups.append({'params': other_no_decay, 'lr': self.lr, 'target_lr': self.lr,
+                                'weight_decay': 0.0, 'name': 'fusion_decoder_no_decay'})
+        if encoder_decay:
+            param_groups.append({'params': encoder_decay, 'lr': self.finetune_lr, 'target_lr': self.finetune_lr,
+                                'weight_decay': self.weight_decay, 'name': 'encoders_decay'})
+        if encoder_no_decay:
+            param_groups.append({'params': encoder_no_decay, 'lr': self.finetune_lr, 'target_lr': self.finetune_lr,
+                                'weight_decay': 0.0, 'name': 'encoders_no_decay'})
+
+        if not param_groups:
+            param_groups = [{'params': [], 'lr': self.lr, 'target_lr': self.lr,
+                            'weight_decay': self.weight_decay, 'name': 'empty'}]
+
+        stats = (len(other_decay), len(other_no_decay), len(encoder_decay), len(encoder_no_decay))
+        return param_groups, stats
 
     def _get_encoder_param_ids(self):
         # Used to distinguish encoder params from fusion/decoder params when building groups.
@@ -1115,44 +1187,16 @@ class MaskedDPMultimodalAgent:
         return ids
 
     def _rebuild_optimizer(self):
-        """Rebuild optimizer with only trainable parameters"""
+        """Rebuild optimizer with only trainable parameters (decay/no_decay x encoder/other)."""
         encoder_ids = self._get_encoder_param_ids()
-        encoder_params, other_params = [], []
-
-        for p in self.model.parameters():
-            if not p.requires_grad:
-                continue
-            if p.data_ptr() in encoder_ids:
-                encoder_params.append(p)
-            else:
-                other_params.append(p)
-
-        param_groups = []
-        if other_params:
-            param_groups.append({
-                'params': other_params,
-                'lr': self.lr,
-                'target_lr': self.lr,
-                'name': 'fusion_decoder',
-            })
-        if encoder_params:
-            param_groups.append({
-                'params': encoder_params,
-                'lr': self.finetune_lr,
-                'target_lr': self.finetune_lr,
-                'name': 'encoders',
-            })
-
-        # Fallback: nothing in either bucket (shouldn't happen, but be safe)
-        if not param_groups:
-            param_groups = [{'params': [], 'lr': self.lr, 'target_lr': self.lr, 'name': 'empty'}]
+        param_groups, (od_len, ond_len, ed_len, end_len) = self._build_param_groups(encoder_ids)
 
         print(
             f"[Optimizer] Full rebuild — "
-            f"{len(other_params)} fusion/decoder params @ lr={self.lr}, "
-            f"{len(encoder_params)} encoder params @ lr={self.finetune_lr}"
+            f"fusion/decoder: {od_len} decay / {ond_len} no_decay @ lr={self.lr}, "
+            f"encoders: {ed_len} decay / {end_len} no_decay @ lr={self.finetune_lr}"
         )
-        self.opt = torch.optim.Adam(param_groups)
+        self.opt = torch.optim.AdamW(param_groups)
 
     def _add_encoder_param_groups(self, newly_unfrozen_names):
         # Collect all param data_ptrs already tracked by the optimizer
@@ -1161,31 +1205,43 @@ class MaskedDPMultimodalAgent:
             for p in grp['params']:
                 existing_ids.add(p.data_ptr())
 
-        new_params = []
+        decay_ids, no_decay_ids = self._classify_params()
+
+        new_decay, new_no_decay = [], []
         for name in newly_unfrozen_names:
             module = getattr(self.model, name, None)
             if module is None:
                 continue
             for p in module.parameters():
                 if p.requires_grad and p.data_ptr() not in existing_ids:
-                    new_params.append(p)
+                    (new_decay if p.data_ptr() in decay_ids else new_no_decay).append(p)
 
-        if not new_params:
+        if not new_decay and not new_no_decay:
             print(
                 f"[Optimizer] _add_encoder_param_groups: no new params to add "
                 f"(already tracked or empty). Skipping."
             )
             return
 
-        self.opt.add_param_group({
-            'params': new_params,
-            'lr': self.finetune_lr,
-            'target_lr': self.finetune_lr,
-            'name': 'encoders',
-        })
+        if new_decay:
+            self.opt.add_param_group({
+                'params': new_decay,
+                'lr': self.finetune_lr,
+                'target_lr': self.finetune_lr,
+                'weight_decay': self.weight_decay,
+                'name': 'encoders_decay',
+            })
+        if new_no_decay:
+            self.opt.add_param_group({
+                'params': new_no_decay,
+                'lr': self.finetune_lr,
+                'target_lr': self.finetune_lr,
+                'weight_decay': 0.0,
+                'name': 'encoders_no_decay',
+            })
         print(
-            f"[Optimizer] add_param_group — {len(new_params)} encoder params "
-            f"@ lr={self.finetune_lr}. Fusion/decoder Adam state PRESERVED."
+            f"[Optimizer] add_param_group — {len(new_decay)} decay + {len(new_no_decay)} no_decay "
+            f"encoder params @ lr={self.finetune_lr}. Fusion/decoder Adam state PRESERVED."
         )
 
     # ------------------------------------------------------------------
@@ -1310,7 +1366,8 @@ class MaskedDPMultimodalAgent:
             target_s = self.model._make_state_target(states)
         
         mask_loss, state_loss, action_loss, action_acc, action_acc_all_valid, state_loss_masked = self.model.forward_loss(
-            target_s, actions, pred_s, pred_a, mask, valid_mask=valid_mask
+            target_s, actions, pred_s, pred_a, mask, valid_mask=valid_mask,
+            label_smoothing=self.model.label_smoothing,
         )
         
         if self.config.loss == "masked":
@@ -1388,15 +1445,12 @@ class MaskedDPMultimodalAgent:
             x_fused, ids_restore, valid_il=valid_il
         )
 
-        # Build the state/recon target exactly like update_mdp.
-        # In pixel mode obs is (B, T, H, W, C): _make_state_target normalizes
-        # it to [0,1] directly (no encoder pass); in embedding mode it embeds via
-        # _embed_states.
         with torch.no_grad():
             target_s = self.model._make_state_target(obs)
 
         mask_loss, state_loss, action_loss, action_acc, action_acc_all_valid, state_loss_masked = self.model.forward_loss(
-            target_s, action, pred_s, pred_a, mask, valid_mask=valid_mask
+            target_s, action, pred_s, pred_a, mask, valid_mask=valid_mask,
+            label_smoothing=0.0,
         )
 
         if self.use_tb:

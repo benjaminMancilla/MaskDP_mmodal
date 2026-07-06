@@ -84,12 +84,14 @@ class ParallelCoAttentionBlock(nn.Module):
         # Expansion ratio (for FLOPS and parameters balance)
         mlp_ratio = getattr(config, 'mlp_ratio', 4) 
         hidden_dim = int(mlp_ratio * config.n_embd)
+        mlp_pdrop = getattr(config, "mlp_pdrop", 0.0)
 
         # FFN Pre-Norms and MLPs
         self.ln2_s = nn.LayerNorm(config.n_embd)
         self.mlp_s = nn.Sequential(
             nn.Linear(config.n_embd, hidden_dim),
             nn.GELU(),
+            nn.Dropout(mlp_pdrop),
             nn.Linear(hidden_dim, config.n_embd),
             nn.Dropout(config.resid_pdrop),
         )
@@ -98,6 +100,7 @@ class ParallelCoAttentionBlock(nn.Module):
         self.mlp_a = nn.Sequential(
             nn.Linear(config.n_embd, hidden_dim),
             nn.GELU(),
+            nn.Dropout(mlp_pdrop),
             nn.Linear(hidden_dim, config.n_embd),
             nn.Dropout(config.resid_pdrop),
         )
@@ -196,6 +199,7 @@ class CoAttentionBlock(nn.Module):
 
         mlp_ratio = float(getattr(config, "fusion_mlp_ratio", 4.0))
         hidden_dim = int(mlp_ratio * config.n_embd)
+        mlp_pdrop = getattr(config, "mlp_pdrop", 0.0)
 
         # Stream 1 (ex. States)
         self.ln1_s = nn.LayerNorm(config.n_embd)
@@ -204,6 +208,7 @@ class CoAttentionBlock(nn.Module):
         self.mlp_s = nn.Sequential(
             nn.Linear(config.n_embd, hidden_dim),
             nn.GELU(),
+            nn.Dropout(mlp_pdrop),
             nn.Linear(hidden_dim, config.n_embd),
             nn.Dropout(config.resid_pdrop),
         )
@@ -215,6 +220,7 @@ class CoAttentionBlock(nn.Module):
         self.mlp_a = nn.Sequential(
             nn.Linear(config.n_embd, hidden_dim),
             nn.GELU(),
+            nn.Dropout(mlp_pdrop),
             nn.Linear(hidden_dim, config.n_embd),
             nn.Dropout(config.resid_pdrop),
         )
@@ -310,9 +316,11 @@ class Block(nn.Module):
         self.ln1 = nn.LayerNorm(config.n_embd)
         self.ln2 = nn.LayerNorm(config.n_embd)
         self.attn = CausalSelfAttention(config)
+        mlp_pdrop = getattr(config, "mlp_pdrop", 0.0)
         self.mlp = nn.Sequential(
             nn.Linear(config.n_embd, 4 * config.n_embd),
             nn.GELU(),
+            nn.Dropout(mlp_pdrop),
             nn.Linear(4 * config.n_embd, config.n_embd),
             nn.Dropout(config.resid_pdrop),
         )
@@ -365,6 +373,7 @@ class CoAttentionBlockSharedMLP(nn.Module):
         super().__init__()
         mlp_ratio = float(getattr(config, "fusion_mlp_ratio", 4.0))
         hidden_dim = int(mlp_ratio * config.n_embd)
+        mlp_pdrop = getattr(config, "mlp_pdrop", 0.0)
 
         # Cross-attention streams (identical to CoAttentionBlock)
         self.ln1_s = nn.LayerNorm(config.n_embd)
@@ -377,6 +386,7 @@ class CoAttentionBlockSharedMLP(nn.Module):
         self.mlp = nn.Sequential(
             nn.Linear(config.n_embd, hidden_dim),
             nn.GELU(),
+            nn.Dropout(mlp_pdrop),
             nn.Linear(hidden_dim, config.n_embd),
             nn.Dropout(config.resid_pdrop),
         )

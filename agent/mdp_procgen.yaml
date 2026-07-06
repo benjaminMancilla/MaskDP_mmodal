@@ -51,8 +51,13 @@ transformer_cfg:
 
   # This stays the same
   embd_pdrop: 0
-  resid_pdrop: 0
-  attn_pdrop: 0
+  weight_decay: 0.01                                  # Decoupled AdamW. 2D matrices only (Linear/Conv)
+  dropout: 0.1                                       # attn_pdrop/resid_pdrop/mlp_pdrop
+  attn_pdrop: ${agent.transformer_cfg.dropout}        # dropout on attention weights (post-softmax), self- and cross-attention
+  resid_pdrop: ${agent.transformer_cfg.dropout}       # residual/projection dropout, output of each sub-layer before the residual connection
+  mlp_pdrop: ${agent.transformer_cfg.dropout}         # dropout within the FFN of each block, right after the activation (GELU)
+  input_dropout: 0.0                                  # dropout on features CNN->transformer (state stream). Off by default.
+  label_smoothing: 0.0                                # label smoothing ONLY for the action CE (0.0 = off, ablatable).
   pe: 'fixed'
   loss: 'total'
   norm: 'l2'
