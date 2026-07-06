@@ -10,7 +10,7 @@ from collections import OrderedDict
 import utils
 from dm_control.utils import rewards
 from einops import rearrange, reduce, repeat
-from agent.modules.attention import Block, CausalSelfAttention, CoAttentionBlock, ParallelCoAttentionBlock, AdapterMLP, CoAttentionBlockSharedMLP
+from agent.modules.attention import Block, CausalSelfAttention, CoAttentionBlock, AdapterMLP, CoAttentionBlockSharedMLP
 from agent.modules.pixel_encoder import PixelEncoder
 from agent.modules.load_pretrained_encoder import load_drqbc_convnet, load_procgen_impala
 from agent.modules.pixel_recon_decoder import PixelReconDecoder
@@ -185,30 +185,21 @@ class MaskedDPMultimodal(nn.Module):
             print(f"Rel. Weights -> Action: {self.p_drop_action}, State: {self.p_drop_state}")
             print(f"Min. Tokens -> Actions: {self.min_keep_actions}, States: {self.min_keep_states}")
 
-        # Feature Flag for Ablation
-        self.use_early_fusion = bool(getattr(config, "use_early_fusion", False))
-
-        if self.use_early_fusion:
-            # EARLY FUSION: Parallel Blocks
-            self.early_fusion_blocks = nn.ModuleList(
-                [ParallelCoAttentionBlock(config) for _ in range(config.n_enc_layer)]
-            )
+        # Separate encoders for state and action (Late Fusion Baseline)
+        if self._has_enc_proj:
+            from omegaconf import OmegaConf
+            _enc_cfg_dict = OmegaConf.to_container(config, resolve=True)
+            _enc_cfg_dict['n_embd'] = self.enc_n_embd
+            enc_config = OmegaConf.create(_enc_cfg_dict)
         else:
-            # LATE FUSION (Baseline): Separate encoders for state and action
-            if self._has_enc_proj:
-                from omegaconf import OmegaConf
-                _enc_cfg_dict = OmegaConf.to_container(config, resolve=True)
-                _enc_cfg_dict['n_embd'] = self.enc_n_embd
-                enc_config = OmegaConf.create(_enc_cfg_dict)
-            else:
-                enc_config = config
+            enc_config = config
 
-            self.state_encoder_blocks = nn.ModuleList(
-                [Block(enc_config) for _ in range(config.n_enc_layer)]
-            )
-            self.action_encoder_blocks = nn.ModuleList(
-                [Block(enc_config) for _ in range(config.n_enc_layer)]
-            )
+        self.state_encoder_blocks = nn.ModuleList(
+            [Block(enc_config) for _ in range(config.n_enc_layer)]
+        )
+        self.action_encoder_blocks = nn.ModuleList(
+            [Block(enc_config) for _ in range(config.n_enc_layer)]
+        )
         
         # Normalization for encoders
         self.state_encoder_norm = nn.LayerNorm(self.enc_n_embd)
@@ -420,21 +411,6 @@ class MaskedDPMultimodal(nn.Module):
                 nn.init.zeros_(blk.attn.proj.bias)
                 zero_init_last_linear(blk.mlp)
 
-        # Estable Early Fusion with zero init
-        # Same strategy as the fusion block
-        if getattr(self, "use_early_fusion", False):
-            for blk in self.early_fusion_blocks:
-                # Init Stream S
-                nn.init.zeros_(blk.cross_attn_s.proj.weight)
-                nn.init.zeros_(blk.cross_attn_s.proj.bias)
-                nn.init.zeros_(blk.mlp_s[2].weight)
-                nn.init.zeros_(blk.mlp_s[2].bias)
-
-                # Init Stream A
-                nn.init.zeros_(blk.cross_attn_a.proj.weight)
-                nn.init.zeros_(blk.cross_attn_a.proj.bias)
-                nn.init.zeros_(blk.mlp_a[2].weight)
-                nn.init.zeros_(blk.mlp_a[2].bias)
 
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
@@ -797,23 +773,14 @@ class MaskedDPMultimodal(nn.Module):
         s_attn_mask = (s_valid.unsqueeze(2) & s_valid.unsqueeze(1)).unsqueeze(1).to(dtype=torch.float32)
         a_attn_mask = (a_valid.unsqueeze(2) & a_valid.unsqueeze(1)).unsqueeze(1).to(dtype=torch.float32)
         
-        # Process with separate encoders (Early vs Late Fusion)
+        # Process with separate encoders
         s_encoded = s_masked
         a_encoded = a_masked
 
-        if self.use_early_fusion:
-            #EARLY FUSION
-            for blk in self.early_fusion_blocks:
-                s_encoded, a_encoded = blk(
-                    x_s=s_encoded, x_a=a_encoded,
-                    mask_s=s_attn_mask, mask_a=a_attn_mask,
-                    pad_mask_s=s_pad_mask_1d, pad_mask_a=a_pad_mask_1d
-                )
-        else:
-            for blk in self.state_encoder_blocks:
-                s_encoded = blk(s_encoded, s_attn_mask)
-            for blk in self.action_encoder_blocks:
-                a_encoded = blk(a_encoded, a_attn_mask)
+        for blk in self.state_encoder_blocks:
+            s_encoded = blk(s_encoded, s_attn_mask)
+        for blk in self.action_encoder_blocks:
+            a_encoded = blk(a_encoded, a_attn_mask)
 
         s_encoded = self.state_encoder_norm(s_encoded)   # [B, Ls, enc_n_embd]
         a_encoded = self.action_encoder_norm(a_encoded)   # [B, La, enc_n_embd]
