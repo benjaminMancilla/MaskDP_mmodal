@@ -212,7 +212,7 @@ class MaskedDP(nn.Module):
         # unshuffle to get the binary mask
         mask = torch.gather(mask, dim=1, index=ids_restore)
 
-        return x_masked, mask, ids_restore
+        return x_masked, mask, ids_restore, ids_keep
 
     def _sample_jitter_length(self):
         """Sample a trajectory length T for temporal jitter."""
@@ -233,7 +233,7 @@ class MaskedDP(nn.Module):
         return T_max
 
 
-    def forward_encoder(self, states, actions, mask_ratio):
+    def forward_encoder(self, states, actions, mask_ratio, valid_mask=None):
         batch_size, T_full = states.shape[0], states.shape[1]
         obs_dim = states.shape[2] if states.ndim == 3 else None
 
@@ -245,10 +245,22 @@ class MaskedDP(nn.Module):
             offset = np.random.randint(0, max_offset + 1)
             states  = states[:, offset:offset + T_jitter, :]
             actions = actions[:, offset:offset + T_jitter, :]
+            if valid_mask is not None:
+                valid_mask = valid_mask[:, offset:offset + T_jitter]
             T = T_jitter
         else:
             offset = 0
-            T = T_full  
+            T = T_full
+
+        # Per-token validity for padding (short episodes): interleave [v0,v0,v1,v1,...].
+        # None -> no padding (V-D4RL / dm_control), behaves exactly as before.
+        valid_tok = None
+        if valid_mask is not None:
+            v = valid_mask
+            if v.dim() == 3:
+                v = v.squeeze(-1)                                  # [B, T]
+            v = v.to(dtype=states.dtype)
+            valid_tok = v.repeat_interleave(2, dim=1)              # [B, 2T]
 
 
         batch_size, T = states.shape[0], states.shape[1]
@@ -290,14 +302,29 @@ class MaskedDP(nn.Module):
             noise.scatter_(1, top_a_idx * 2 + 1, -100.0)
 
 
-        x, mask, ids_restore = self.random_masking(x, mask_ratio, noise=noise)
+        # Padding bias: push padded tokens to the end of the ranking so random_masking
+        # removes them first (applied AFTER the shields so it dominates them). Guarantees
+        # at least min(len_keep, #valid) valid kept tokens -> no fully-masked attention row.
+        if valid_tok is not None:
+            noise = noise + (1.0 - valid_tok) * 1.0e4
+
+        x, mask, ids_restore, ids_keep = self.random_masking(x, mask_ratio, noise=noise)
+
+        # Encoder attention mask: block attention TO any padded token that survived into
+        # the kept set (only happens when the episode is shorter than the kept length).
+        if valid_tok is not None:
+            kept_valid = torch.gather(valid_tok, 1, ids_keep)      # [B, len_keep]
+            enc_attn = kept_valid[:, None, None, :]                # block padded key columns
+        else:
+            enc_attn = self.attn_mask
+
         # apply Transformer blocks
         for blk in self.encoder_blocks:
-            x = blk(x, self.attn_mask)
+            x = blk(x, enc_attn)
         x = self.encoder_norm(x)
-        return x, mask, ids_restore, T, offset
+        return x, mask, ids_restore, T, offset, valid_tok
 
-    def forward_decoder(self, x, ids_restore):
+    def forward_decoder(self, x, ids_restore, valid_tok=None):
         # append mask tokens to sequence
         mask_tokens = self.mask_token.repeat(
             x.shape[0], ids_restore.shape[1] - x.shape[1], 1
@@ -314,9 +341,12 @@ class MaskedDP(nn.Module):
         # add pos embed
         x = x + self.decoder_pos_embed[:, :x.shape[1], :]
 
+        # Decoder attention mask: block padded key columns over the full 2T sequence.
+        dec_attn = self.attn_mask if valid_tok is None else valid_tok[:, None, None, :]
+
         # apply Transformer blocks
         for blk in self.decoder_blocks:
-            x = blk(x, self.attn_mask)
+            x = blk(x, dec_attn)
 
         # predictor projection
         s = self.state_head(x[:, ::2])
@@ -324,8 +354,9 @@ class MaskedDP(nn.Module):
 
         return s, a
 
-    def forward_loss(self, target_s, target_a, pred_s, pred_a, mask, label_smoothing=0.0):
+    def forward_loss(self, target_s, target_a, pred_s, pred_a, mask, label_smoothing=0.0, valid_mask=None):
         # label_smoothing: applied ONLY to the action Cross-Entropy (discrete actions).
+        # valid_mask [B, T] (1=real, 0=pad): padded tokens are excluded from every term.
         batch_size, T, _ = target_s.size()
         # State target normalization
         if self.norm == "l2":
@@ -355,24 +386,38 @@ class MaskedDP(nn.Module):
         else:
             loss_a_t = ((pred_a - target_a) ** 2).mean(dim=-1)   # [B, T]
 
-        # Interleave [s0,a0,s1,a1,...] -> [B, 2T]; action term scaled by action_loss_weight
+        # Per-timestep validity (1=real, 0=pad); ones when there is no padding.
+        if valid_mask is not None:
+            v_t = valid_mask.to(device=loss_s_t.device, dtype=loss_s_t.dtype)
+            if v_t.dim() == 3 and v_t.size(-1) == 1:
+                v_t = v_t.squeeze(-1)                      # [B, T]
+            loss_s_t = loss_s_t * v_t
+            loss_a_t = loss_a_t * v_t
+        else:
+            v_t = torch.ones_like(loss_s_t)
+
+        # Interleave [s0,a0,s1,a1,...] -> [B, 2T]; action term scaled by action_loss_weight.
         loss_tokens = torch.stack(
             [loss_s_t, loss_a_t * self.action_loss_weight], dim=-1
         ).reshape(batch_size, 2 * T)
-        masked_loss = (loss_tokens * mask).sum() / mask.sum().clamp(min=1.0e-8)
+        v_interleaved = v_t.repeat_interleave(2, dim=1)            # [B, 2T]
+        combined_weight = mask * v_interleaved
+        masked_loss = (loss_tokens * combined_weight).sum() / combined_weight.sum().clamp(min=1.0e-8)
 
-        state_loss = loss_s_t.mean()
-        action_loss = loss_a_t.mean()
+        denom = v_t.sum().clamp(min=1.0e-8)
+        state_loss = loss_s_t.sum() / denom
+        action_loss = loss_a_t.sum() / denom
 
-        # Discrete action accuracy on the masked-for-recon action tokens only.
+        # Discrete action accuracy on masked-for-recon, valid action tokens only.
         action_acc = None
         if self.discrete_actions:
             with torch.no_grad():
                 pred_idx = pred_a.argmax(dim=-1)           # [B, T]
-                action_removed = mask[:, 1::2].bool()      # 1 = action token masked
                 correct = (pred_idx == a_tgt)
-                action_acc = (correct[action_removed].float().mean()
-                              if action_removed.any() else pred_a.new_tensor(float('nan')))
+                action_removed = mask[:, 1::2].bool()      # 1 = action token masked
+                sel = action_removed & v_t.bool()
+                action_acc = (correct[sel].float().mean()
+                              if sel.any() else pred_a.new_tensor(float('nan')))
 
         return masked_loss, state_loss, action_loss, action_acc
 
@@ -412,7 +457,7 @@ class MaskedDPAgent:
         self.training = training
         self.model.train(training)
 
-    def update_mdp(self, states, actions, step=0):
+    def update_mdp(self, states, actions, valid_mask=None, step=0):
         metrics = dict()
         mask_ratio = np.random.choice(self.mask_ratio)
         # Freeze pixel encoder after convergence (used in trainble CNN)
@@ -422,8 +467,8 @@ class MaskedDPAgent:
                 for p in self.model.pixel_encoder.parameters():
                     p.requires_grad = False
                 print(f"[step {step}] Pixel encoder frozen.")
-        latent, mask, ids_restore, T, offset = self.model.forward_encoder(
-            states, actions, mask_ratio
+        latent, mask, ids_restore, T, offset, valid_tok = self.model.forward_encoder(
+            states, actions, mask_ratio, valid_mask=valid_mask
         )
 
         with torch.no_grad():
@@ -434,11 +479,13 @@ class MaskedDPAgent:
         target_a = actions[:, offset:offset + T, :]
 
         pred_s, pred_a = self.model.forward_decoder(
-            latent, ids_restore
+            latent, ids_restore, valid_tok
         )  # [N, L, p*p*3]
+        loss_valid = valid_tok[:, 0::2] if valid_tok is not None else None
         mask_loss, state_loss, action_loss, action_acc = self.model.forward_loss(
             target_s, target_a, pred_s, pred_a, mask,
             label_smoothing=self.model.label_smoothing,
+            valid_mask=loss_valid,
         )
         if self.config.loss == "masked":
             loss = mask_loss
@@ -463,9 +510,11 @@ class MaskedDPAgent:
     def eval_validation(self, val_iter, step=None):
         metrics = dict()
         batch = next(val_iter)
-        obs, action, _, _, _, _ = utils.to_torch(batch, self.device)
+        obs, action, _, _, _, valid_mask = utils.to_torch(batch, self.device)
         mask_ratio = np.random.choice(self.mask_ratio)
-        latent, mask, ids_restore, T, offset = self.model.forward_encoder(obs, action, mask_ratio)
+        latent, mask, ids_restore, T, offset, valid_tok = self.model.forward_encoder(
+            obs, action, mask_ratio, valid_mask=valid_mask
+        )
         with torch.no_grad():
             if self.model.use_pixel_obs:
                 target_s = self.model._embed_states(obs[:, offset:offset + T])
@@ -473,11 +522,13 @@ class MaskedDPAgent:
                 target_s = obs[:, offset:offset + T]
         target_a = action[:, offset:offset + T, :]
         pred_s, pred_a = self.model.forward_decoder(
-            latent, ids_restore
+            latent, ids_restore, valid_tok
         )  # [N, L, p*p*3]
+        loss_valid = valid_tok[:, 0::2] if valid_tok is not None else None
         mask_loss, state_loss, action_loss, action_acc = self.model.forward_loss(
             target_s, target_a, pred_s, pred_a, mask,
             label_smoothing=0.0,
+            valid_mask=loss_valid,
         )
 
         if self.use_tb:
@@ -493,9 +544,9 @@ class MaskedDPAgent:
         metrics = dict()
 
         batch = next(replay_iter)
-        obs, action, _, _, _, _ = utils.to_torch(batch, self.device)
+        obs, action, _, _, _, valid_mask = utils.to_torch(batch, self.device)
 
         # update critic
-        metrics.update(self.update_mdp(obs, action, step))
+        metrics.update(self.update_mdp(obs, action, valid_mask, step))
 
         return metrics
