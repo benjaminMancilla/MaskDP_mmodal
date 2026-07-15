@@ -54,6 +54,8 @@ transformer_cfg:
   resid_pdrop: ${agent.transformer_cfg.dropout}
   mlp_pdrop: ${agent.transformer_cfg.dropout}
   embd_pdrop: 0
+  # Decoupled AdamW weight decay (2D matrices only).
+  weight_decay: 0
   pe: 'fixed'
   loss: 'total'
   norm: 'l2'
