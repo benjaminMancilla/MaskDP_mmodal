@@ -2,6 +2,8 @@ import torch
 import torch.nn as nn
 import torchvision.models as models
 
+from agent.modules.impala_cnn import ImpalaCnn
+
 
 class DrQv2Encoder(nn.Module):
     """
@@ -106,6 +108,48 @@ class ResNetFrozenEncoder(nn.Module):
         return x
 
 
+class ImpalaProcgenEncoder(nn.Module):
+    """
+    IMPALA-CNN encoder, pretrained via PPO on Procgen (sgoodfriend/rl-algo-impls).
+    Reference checkpoint: https://huggingface.co/sgoodfriend/ppo-procgen-coinrun-easy
+    (env: coinrun, distribution_mode: easy, cnn_style: impala, cnn_feature_dim: 256).
+    """
+
+    def __init__(self, obs_shape, feature_dim: int):
+        super().__init__()
+        H, W, C = obs_shape
+
+        self.convnet = ImpalaCnn(C, activation=nn.ReLU, init_layers_orthogonal=False)
+
+        with torch.no_grad():
+            dummy = torch.zeros(1, C, H, W)
+            conv_out = self.convnet(dummy)
+            self.conv_out_dim = int(conv_out.flatten(1).shape[1])
+
+        # Random projection weights if the output hidden_dim doesn't match with 256
+        self.projection = nn.Linear(self.conv_out_dim, feature_dim)
+
+    def forward_single(self, x_btchw_uint8: torch.Tensor) -> torch.Tensor:
+        x = x_btchw_uint8.float() / 255.0
+        h = self.convnet(x)
+        h = self.projection(h)
+        return torch.relu(h)
+
+    def forward(self, obs: torch.Tensor) -> torch.Tensor:
+        squeeze = obs.ndim == 4
+        if squeeze:
+            obs = obs.unsqueeze(1)  # -> (B, 1, H, W, C)
+
+        B, T, H, W, C = obs.shape
+        x = obs.reshape(B * T, H, W, C).permute(0, 3, 1, 2).contiguous()  # (B*T, C, H, W)
+        feat = self.forward_single(x)
+        feat = feat.reshape(B, T, -1)
+
+        if squeeze:
+            feat = feat.squeeze(1)
+        return feat
+
+
 def PixelEncoder(obs_shape, feature_dim: int, encoder_type: str = "drqv2"):
     """
     Returns the requested encoder module.
@@ -113,15 +157,18 @@ def PixelEncoder(obs_shape, feature_dim: int, encoder_type: str = "drqv2"):
     encoder_type:
         - "drqv2"          : trainable DrQ-v2 style CNN (default; ~250k params)
         - "resnet_frozen"  : ResNet18-ImageNet, fully frozen (legacy baseline)
+        - "procgen_impala" : IMPALA-CNN, pretrained via PPO on Procgen-CoinRun
     """
     if encoder_type == "drqv2":
         return DrQv2Encoder(obs_shape, feature_dim)
     elif encoder_type == "resnet_frozen":
         return ResNetFrozenEncoder(obs_shape, feature_dim)
+    elif encoder_type == "procgen_impala":
+        return ImpalaProcgenEncoder(obs_shape, feature_dim)
     else:
         raise ValueError(
             f"Unknown encoder_type='{encoder_type}'. "
-            f"Choose from: 'drqv2', 'resnet_frozen'."
+            f"Choose from: 'drqv2', 'resnet_frozen', 'procgen_impala'."
         )
 
 

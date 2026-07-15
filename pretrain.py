@@ -139,14 +139,29 @@ def main(cfg):
     obs_type   = cfg.get("obs_type", "states")
     pixel_size = cfg.get("pixel_size", 84)
     _frame_stack = cfg.get("frame_stack", 1)
-    env = dmc.make(cfg.task, seed=cfg.seed, obs_type=obs_type, pixel_size=pixel_size,
-                frame_stack=_frame_stack)
+
+    # use_live_env=False: fully-offline pretraining with no runnable environment (Procgen)
+    use_live_env = cfg.get("use_live_env", True)
+
+    if use_live_env:
+        env = dmc.make(cfg.task, seed=cfg.seed, obs_type=obs_type, pixel_size=pixel_size,
+                    frame_stack=_frame_stack)
+        obs_shape = env.observation_spec().shape
+        action_shape = env.action_spec().shape
+    else:
+        env = None
+        tcfg = cfg.agent.transformer_cfg
+        obs_shape = tuple(tcfg.pixel_obs_shape) if tcfg.get("use_pixel_obs", False) else (1,)
+        action_shape = (1,)
+        print(f"[use_live_env=False] No live environment. obs_shape={obs_shape} action_shape={action_shape} "
+              f"are placeholders -- the model reads pixel_obs_shape/num_actions from transformer_cfg directly. "
+              f"Goal-reaching and masked-return eval are force-disabled (both need env.step()).")
 
     # create agent
     agent = hydra.utils.instantiate(
         cfg.agent,
-        obs_shape=env.observation_spec().shape,
-        action_shape=env.action_spec().shape,
+        obs_shape=obs_shape,
+        action_shape=action_shape,
     )
 
     if cfg.resume is True:
@@ -157,7 +172,7 @@ def main(cfg):
             frozen = not any(p.requires_grad for p in agent.model.pixel_encoder.parameters())
             print(f"[resume] pixel encoder frozen: {frozen}")
 
-    domain = get_domain(cfg.task)
+    domain = get_domain(cfg.task) if use_live_env else cfg.task
     if cfg.get("resume", False):
         snapshot_dir = Path(cfg.snapshot_dir) / domain / str(cfg.seed)
     else:
@@ -165,8 +180,8 @@ def main(cfg):
     snapshot_dir.mkdir(exist_ok=True, parents=True)
 
     # create logger
-    cfg.agent.obs_shape = env.observation_spec().shape
-    cfg.agent.action_shape = env.action_spec().shape
+    cfg.agent.obs_shape = obs_shape
+    cfg.agent.action_shape = action_shape
     exp_name = str(cfg.exp_name) if cfg.get("exp_name", None) else "_".join([cfg.agent.name, domain, str(cfg.seed)])
     wandb_config = omegaconf.OmegaConf.to_container(
         cfg, resolve=True, throw_on_missing=True
@@ -206,16 +221,17 @@ def main(cfg):
         train_ratio=cfg.get("train_ratio", 0.8),
         eval_ratio=cfg.get("eval_ratio", 0.1),
         bc_ratio=cfg.get("bc_ratio", 0.1),
+        has_dummy_transition=cfg.get("has_dummy_transition", True),
     )
     train_iter = iter(train_loader)
 
 
     # Return evaluation loader (disabled via use_return_eval=false, ej. dataset custom pixel)
     eval_agent = None
-    if cfg.get("obs_type", "states") == "pixels" and cfg.get("use_return_eval", True):
+    if use_live_env and cfg.get("obs_type", "states") == "pixels" and cfg.get("use_return_eval", True):
         eval_agent = mdp_return_module.MaskingEvalAgent(
-            obs_shape=env.observation_spec().shape,
-            action_shape=env.action_spec().shape,
+            obs_shape=obs_shape,
+            action_shape=action_shape,
             device=device,
             T_cond=cfg.get("eval_T_cond", 32),
             T_pred=cfg.get("eval_T_pred", 32),
@@ -226,7 +242,7 @@ def main(cfg):
     # Goal evaluation loader
     goal_iter = None
     video_recorder = VideoRecorder(work_dir if cfg.save_video else None)
-    if hasattr(cfg, 'goal_buffer_dir') and cfg.goal_buffer_dir is not None:
+    if use_live_env and hasattr(cfg, 'goal_buffer_dir') and cfg.goal_buffer_dir is not None:
         goal_dir = Path(cfg.goal_buffer_dir) / cfg.task
         if goal_dir.exists():
             print(f"goal evaluation dir: {goal_dir}")
@@ -247,6 +263,50 @@ def main(cfg):
             )
             goal_iter = iter(goal_loader)
 
+    # Procgen - Epoch validation (BCT return) and early stopping
+    bct_eval_agent = None
+    early_stopper = None
+    bct_splits = None
+    eval_bct_module = None
+    bct_env_name = None
+    bct_distribution_mode = None
+    if cfg.get("use_bct_eval", False):
+        import agent.mdp_bct as mdp_bct_module
+        import eval_bct as eval_bct_module
+
+        bct_env_name = cfg.get("bct_env_name", cfg.task)
+        bct_distribution_mode = cfg.get("bct_distribution_mode", "easy")
+        assert bct_env_name in eval_bct_module.PROCGEN, (
+            f"bct_env_name='{bct_env_name}' is not in the PROCGEN normalization dict (eval_bct.py)."
+        )
+        bct_splits = cfg.get("bct_splits", None)
+        assert bct_splits is not None, "use_bct_eval=True requires cfg.bct_splits (train/val/test)."
+
+        bct_eval_agent = mdp_bct_module.BCTEvalAgent(
+            obs_shape=obs_shape,
+            action_shape=action_shape,
+            device=device,
+            K=cfg.get("bct_eval_K", None),
+            temperature=cfg.get("bct_eval_temperature", 1.0),
+            sample=cfg.get("bct_eval_sample", True),
+            transformer_cfg=agent.model.config,
+        )
+
+        if cfg.get("early_stop", False):
+            early_stopper = utils.EarlyStop(
+                wait_epochs=cfg.get("early_stop_wait_evals", 10),
+                min_delta=cfg.get("early_stop_min_delta", 0.1),
+                strict=cfg.get("early_stop_strict", True),
+            )
+            init_best = cfg.get("early_stop_init_best_return", None)
+            init_waited = cfg.get("early_stop_init_waited_evals", 0)
+            if init_best is not None:
+                early_stopper.best_mean_return = float(init_best)
+                print(f"[EarlyStop] Manual init: best_mean_return={early_stopper.best_mean_return}")
+            if init_waited:
+                early_stopper.waited_epochs = int(init_waited)
+                print(f"[EarlyStop] Manual init: waited_epochs={early_stopper.waited_epochs}")
+
     # create video recorders
 
     timer = utils.Timer()
@@ -256,6 +316,18 @@ def main(cfg):
     train_until_step = utils.Until(cfg.num_grad_steps)
     eval_every_step = utils.Every(cfg.eval_every_steps)
     log_every_step = utils.Every(cfg.log_every_steps)
+
+    steps_per_epoch = cfg.get("steps_per_epoch", None)
+    if steps_per_epoch is None:
+        steps_per_epoch = max(1, round(1_000_000 / cfg.batch_size))
+    print(f"[BCT val] steps_per_epoch={steps_per_epoch} (batch_size={cfg.batch_size})")
+
+    bct_eval_every = None
+    if bct_eval_agent is not None:
+        bct_eval_every_steps = steps_per_epoch * cfg.get("bct_eval_every_epochs", 5)
+        bct_eval_every = utils.Every(bct_eval_every_steps)
+        print(f"[BCT val] evaluating every {cfg.get('bct_eval_every_epochs', 5)} epochs "
+              f"= every {bct_eval_every_steps} steps")
 
     while train_until_step(global_step):
         # try to evaluate
@@ -314,7 +386,92 @@ def main(cfg):
 
             agent.model.train()
 
-        if global_step in cfg.snapshots:
+        # BCT return validation (Procgen): train/val/test raw_return + early stopping
+        stop_training = False
+        if bct_eval_agent is not None and bct_eval_every(global_step):
+            print(f"[{global_step}] Running BCT validation (raw_return, train/val/test)...")
+            bct_eval_agent.mdp.load_state_dict(agent.model.state_dict())
+            bct_eval_agent.eval()
+
+            bct_results = {}
+            with torch.no_grad():
+                for split_name, split_cfg in bct_splits.items():
+                    mean_raw, std_raw, _ = eval_bct_module.eval_bct_split(
+                        bct_eval_agent,
+                        device,
+                        env_name=bct_env_name,
+                        num_levels=split_cfg["num_levels"],
+                        start_level=split_cfg["start_level"],
+                        distribution_mode=bct_distribution_mode,
+                        num_episodes=cfg.get("bct_eval_episodes", 10),
+                    )
+                    bct_results[split_name] = {"raw_return": mean_raw, "raw_return_std": std_raw}
+
+            print(
+                "  [BCT val] "
+                + " | ".join(
+                    f"{name}={r['raw_return']:.2f}±{r['raw_return_std']:.2f}"
+                    for name, r in bct_results.items()
+                )
+            )
+
+            if cfg.use_wandb:
+                wandb_data = {
+                    f"validation/raw_return_{name}": r["raw_return"]
+                    for name, r in bct_results.items()
+                }
+                wandb_data.update(
+                    {
+                        f"validation/raw_return_std_{name}": r["raw_return_std"]
+                        for name, r in bct_results.items()
+                    }
+                )
+                wandb_data["validation/epoch"] = global_step / steps_per_epoch
+                wandb.log(wandb_data, step=global_step)
+
+            # Early stopping decision, val split ONLY.
+            is_new_best = False
+            if early_stopper is not None:
+                val_return = bct_results["val"]["raw_return"]
+                prev_best_epoch = early_stopper.best_mean_return_epoch
+                stop_training = early_stopper.should_stop(global_step, val_return)
+                is_new_best = early_stopper.best_mean_return_epoch != prev_best_epoch
+
+                if cfg.use_wandb:
+                    wandb.log(
+                        {
+                            "validation/best_raw_return_val": early_stopper.best_mean_return,
+                            "validation/early_stop_waited_evals": early_stopper.waited_epochs,
+                        },
+                        step=global_step,
+                    )
+
+            # Checkpointing (per-eval snapshot + best) when early_stop is enabled
+            if cfg.get("early_stop", False):
+                payload = {
+                    "model": agent.model.state_dict(),
+                    "cfg": cfg.agent.transformer_cfg,
+                    "step": global_step,
+                }
+                snapshot = snapshot_dir / f"snapshot_{global_step}.pt"
+                with snapshot.open("wb") as f:
+                    torch.save(payload, f)
+
+                if is_new_best:
+                    best_snapshot = snapshot_dir / "snapshot_best.pt"
+                    with best_snapshot.open("wb") as f:
+                        torch.save(payload, f)
+                    print(f"  [BCT val] New best val raw_return={early_stopper.best_mean_return:.2f} "
+                          f"-> saved {best_snapshot.name}")
+
+            if stop_training:
+                print(f"[{global_step}] Early stopping: no improvement in val raw_return for "
+                      f"{early_stopper.wait_epochs} validation checks. Stopping training.")
+
+            agent.model.train()
+
+        # Regular fixed-list snapshots (disabled when early_stop drives snapshotting)
+        if not cfg.get("early_stop", False) and global_step in cfg.snapshots:
             snapshot = snapshot_dir / f"snapshot_{global_step}.pt"
             payload = {
                 "model": agent.model.state_dict(),
@@ -324,6 +481,9 @@ def main(cfg):
                 torch.save(payload, f)
 
         global_step += 1
+
+        if stop_training:
+            break
 
 
 if __name__ == "__main__":

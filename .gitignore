@@ -14,3 +14,7 @@ diagnose_out/
 out/
 diagnostics/
 diagnostics_scripts/
+CLAUDE.md
+claude/
+.claude
+cluster/

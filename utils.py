@@ -119,6 +119,32 @@ class Every:
         return False
 
 
+class EarlyStop:
+    def __init__(self, wait_epochs=10, min_delta=0.1, strict=True):
+        self.wait_epochs = wait_epochs
+        self.delta = min_delta
+        self.strict = strict
+        self.best_mean_return = -np.inf
+        self.best_mean_return_epoch = 0
+        self.waited_epochs = 0
+
+    def should_stop(self, epoch, mean_return):
+        if mean_return > self.best_mean_return + self.delta:
+            self.best_mean_return = mean_return
+            self.best_mean_return_epoch = epoch
+            if self.strict:
+                self.waited_epochs = 0
+            else:
+                self.waited_epochs -= 1
+        else:
+            self.waited_epochs += 1
+
+        if self.waited_epochs >= self.wait_epochs:
+            return True
+
+        return False
+
+
 class Timer:
     def __init__(self):
         self._start_time = time.time()

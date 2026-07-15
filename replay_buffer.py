@@ -12,9 +12,14 @@ from torch.utils.data import IterableDataset
 from utils import get_norm
 
 
-def episode_len(episode):
-    # subtract -1 because the dummy first transition
-    return next(iter(episode.values())).shape[0] - 1
+def episode_len(episode, has_dummy_transition=True):
+    n = next(iter(episode.values())).shape[0]
+    return n - 1 if has_dummy_transition else n
+
+
+def _pad_zeros(arr, n_pad):
+    pad_shape = (n_pad,) + arr.shape[1:]
+    return np.concatenate([arr, np.zeros(pad_shape, dtype=arr.dtype)], axis=0)
 
 
 def save_episode(episode, fn):
@@ -78,6 +83,7 @@ class OfflineReplayBuffer(IterableDataset):
         eval_ratio=0.1,
         bc_ratio=0.1,
         frame_stack: int = 1,
+        has_dummy_transition: bool = True,
     ):
         self._env = env
         self._replay_dir = replay_dir
@@ -95,6 +101,9 @@ class OfflineReplayBuffer(IterableDataset):
         self._relabel = relabel
         self._obs = obs
         self._frame_stack = frame_stack
+        # True (default) = V-D4RL/dm_control convention (dummy first frame).
+        # False = clean transitions, e.g. Procgen
+        self._has_dummy_transition = has_dummy_transition
         assert abs(train_ratio + eval_ratio + bc_ratio - 1.0) < 1e-6
         self._file_split = file_split
         self._train_ratio = train_ratio
@@ -142,7 +151,7 @@ class OfflineReplayBuffer(IterableDataset):
                 episode = self._relable_reward(episode)
             self._episode_fns.append(eps_fn)
             self._episodes[eps_fn] = episode
-            self._size += episode_len(episode)
+            self._size += episode_len(episode, self._has_dummy_transition)
             
     def _stack_pixel_frames(self, frames, indices, k):
         """
@@ -173,29 +182,130 @@ class OfflineReplayBuffer(IterableDataset):
 
     def _sample(self):
         episode = self._sample_episode()
-        # add +1 for the first dummy transition
-        idx = np.random.randint(0, episode_len(episode) - self._traj_length + 1) + 1
-        if self._obs == "pixels" and self._frame_stack > 1:
-            # Auto-detect pixel key:
-            #   MaskDP custom dataset ("maskdp-pixel") = "pixel_observation"
-            #   V-D4RL dataset                          = "observation"
-            frames = episode.get("pixel_observation", episode["observation"])
-            obs_abs      = np.arange(idx - 1, idx - 1 + self._traj_length)
-            next_obs_abs = np.arange(idx,     idx     + self._traj_length)
-            obs      = self._stack_pixel_frames(frames, obs_abs,      self._frame_stack)
-            next_obs = self._stack_pixel_frames(frames, next_obs_abs, self._frame_stack)
-        elif self._obs == "pixels":
-            frames = episode.get("pixel_observation", episode["observation"])
-            obs      = frames[idx - 1 : idx - 1 + self._traj_length]
-            next_obs = frames[idx     : idx     + self._traj_length]
-        else:
-            obs      = episode["observation"][idx - 1 : idx - 1 + self._traj_length]
-            next_obs = episode["observation"][idx     : idx     + self._traj_length]
-        action = episode["action"][idx : idx + self._traj_length]
-        reward = episode["reward"][idx : idx + self._traj_length]
-        discount = episode["discount"][idx : idx + self._traj_length] * self._discount
-        timestep = np.arange(idx - 1, idx + self._traj_length - 1)[:, np.newaxis]
-        return (obs, action, reward, discount, next_obs, 0)
+
+        if not self._has_dummy_transition:
+            return self._sample_no_dummy(episode)
+
+        L = episode_len(episode, self._has_dummy_transition)
+
+        if L >= self._traj_length:
+            # add +1 for the first dummy transition
+            idx = np.random.randint(0, L - self._traj_length + 1) + 1
+
+            if self._obs == "pixels":
+                # Auto-detect pixel key:
+                #   MaskDP custom dataset ("maskdp-pixel") = "pixel_observation"
+                #   V-D4RL dataset                          = "observation"
+                frames = episode.get("pixel_observation", episode["observation"])
+                if self._frame_stack > 1:
+                    obs_abs      = np.arange(idx - 1, idx - 1 + self._traj_length)
+                    next_obs_abs = np.arange(idx,     idx     + self._traj_length)
+                    obs      = self._stack_pixel_frames(frames, obs_abs,      self._frame_stack)
+                    next_obs = self._stack_pixel_frames(frames, next_obs_abs, self._frame_stack)
+                else:
+                    obs      = frames[idx - 1 : idx - 1 + self._traj_length]
+                    next_obs = frames[idx     : idx     + self._traj_length]
+            else:
+                obs      = episode["observation"][idx - 1 : idx - 1 + self._traj_length]
+                next_obs = episode["observation"][idx     : idx     + self._traj_length]
+
+            action   = episode["action"][idx : idx + self._traj_length]
+            reward   = episode["reward"][idx : idx + self._traj_length]
+            discount = episode["discount"][idx : idx + self._traj_length] * self._discount
+            mask     = np.ones((self._traj_length, 1), dtype=np.float32)
+            return (obs, action, reward, discount, next_obs, mask)
+
+        # frame_stack > 1 not supported for short episodes; V-D4RL always has L >= traj_length
+        if self._frame_stack > 1:
+            raise NotImplementedError(
+                f"Short Episode (L={L} < traj_length={self._traj_length}) with "
+                f"frame_stack={self._frame_stack} > 1"
+            )
+
+        # Zero-pad + valid mask for the missing timesteps
+        idx = 1
+        pad = self._traj_length - L
+
+        frames = episode.get("pixel_observation", episode["observation"]) if self._obs == "pixels" \
+            else episode["observation"]
+
+        obs_real      = frames[idx - 1 : idx - 1 + L]
+        next_obs_real = frames[idx     : idx     + L]
+        action_real   = episode["action"][idx : idx + L]
+        reward_real   = episode["reward"][idx : idx + L]
+        discount_real = episode["discount"][idx : idx + L] * self._discount
+
+        obs      = _pad_zeros(obs_real, pad)
+        next_obs = _pad_zeros(next_obs_real, pad)
+        action   = _pad_zeros(action_real, pad)
+        reward   = _pad_zeros(reward_real, pad)
+        discount = _pad_zeros(discount_real, pad)
+
+        mask = np.zeros((self._traj_length, 1), dtype=np.float32)
+        mask[:L] = 1.0
+
+        return (obs, action, reward, discount, next_obs, mask)
+
+    def _next_obs_window(self, frames, start, length):
+        end = start + 1 + length
+        if end <= frames.shape[0]:
+            return frames[start + 1 : end]
+        valid = frames[start + 1 : frames.shape[0]]
+        n_missing = end - frames.shape[0]
+        pad = np.repeat(frames[-1:], n_missing, axis=0)
+        return np.concatenate([valid, pad], axis=0)
+
+    def _sample_no_dummy(self, episode):
+        L = episode_len(episode, self._has_dummy_transition)
+
+        frames = episode.get("pixel_observation", episode["observation"]) if self._obs == "pixels" \
+            else episode["observation"]
+
+        if L >= self._traj_length:
+            idx = np.random.randint(0, L - self._traj_length + 1)
+
+            if self._obs == "pixels" and self._frame_stack > 1:
+                obs_abs      = np.arange(idx, idx + self._traj_length)
+                next_obs_abs = np.clip(obs_abs + 1, 0, frames.shape[0] - 1)
+                obs      = self._stack_pixel_frames(frames, obs_abs,      self._frame_stack)
+                next_obs = self._stack_pixel_frames(frames, next_obs_abs, self._frame_stack)
+            else:
+                obs      = frames[idx : idx + self._traj_length]
+                next_obs = self._next_obs_window(frames, idx, self._traj_length)
+
+            action   = episode["action"][idx : idx + self._traj_length]
+            reward   = episode["reward"][idx : idx + self._traj_length]
+            discount = episode["discount"][idx : idx + self._traj_length] * self._discount
+            mask     = np.ones((self._traj_length, 1), dtype=np.float32)
+            return (obs, action, reward, discount, next_obs, mask)
+
+        # frame_stack > 1 not supported here either, same limitation as the dummy branch
+        if self._frame_stack > 1:
+            raise NotImplementedError(
+                f"Short Episode (L={L} < traj_length={self._traj_length}) with "
+                f"frame_stack={self._frame_stack} > 1"
+            )
+
+        # Zero-pad + valid mask. idx=0 (no dummy frame to skip, unlike the dummy branch's idx=1).
+        idx = 0
+        pad = self._traj_length - L
+
+        obs_real      = frames[idx : idx + L]
+        next_obs_real = self._next_obs_window(frames, idx, L)
+        action_real   = episode["action"][idx : idx + L]
+        reward_real   = episode["reward"][idx : idx + L]
+        discount_real = episode["discount"][idx : idx + L] * self._discount
+
+        obs      = _pad_zeros(obs_real, pad)
+        next_obs = _pad_zeros(next_obs_real, pad)
+        action   = _pad_zeros(action_real, pad)
+        reward   = _pad_zeros(reward_real, pad)
+        discount = _pad_zeros(discount_real, pad)
+
+        mask = np.zeros((self._traj_length, 1), dtype=np.float32)
+        mask[:L] = 1.0
+
+        return (obs, action, reward, discount, next_obs, mask)
 
     def _sample_goal(self):
         episode = self._sample_episode()
@@ -315,6 +425,7 @@ def make_replay_loader(
     eval_ratio=0.1,
     bc_ratio=0.1,
     frame_stack: int = 1,
+    has_dummy_transition: bool = True,
 ):
     max_size_per_worker = max_size // max(1, num_workers)
 
@@ -335,6 +446,7 @@ def make_replay_loader(
         eval_ratio=eval_ratio,
         bc_ratio=bc_ratio,
         frame_stack=frame_stack,
+        has_dummy_transition=has_dummy_transition,
     )
 
     loader = torch.utils.data.DataLoader(

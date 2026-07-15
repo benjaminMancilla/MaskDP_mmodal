@@ -1,0 +1,58 @@
+# @package agent
+# Single-stream MaskDP (original architecture) adapted to Procgen/coinrun.
+# Mirrors the multi-stream hier-procgen setup so the unimodal-vs-multimodal
+# comparison holds everything but the architecture constant.
+_target_: agent.mdp.MaskedDPAgent
+name: mdp
+obs_shape: ??? # to be specified later
+action_shape: ??? # to be specified later
+device: ${device}
+lr: 1e-4
+use_tb: ${use_tb}
+batch_size: 64
+mask_ratio: [0.15, 0.35, 0.55, 0.75, 0.95]
+transformer_cfg:
+  # Temporal jitter OFF for Procgen (matches the multi-stream procgen runs)
+  traj_lengths: null
+  jitter_strategy: 'mix50'
+  traj_length: 64           # context length -> model max_len and dataloader window
+
+  n_embd: 256               # hidden dim
+  n_head: 4                 # attention heads
+  n_enc_layer: 3            # encoder layers
+  n_dec_layer: 2            # decoder layers
+
+  # Modality dropout OFF for Procgen (matches the multi-stream procgen runs).
+  # min_keep_* shields still run and are harmless (force-keep >=1 state token).
+  modality_dropout: false
+  modality_dropout_prob: 0.60
+  action_dropout_prob: 1.0
+  state_dropout_prob: 0.0
+  min_keep_states: 1
+  min_keep_actions: 0
+
+  # Visual: frozen IMPALA CNN (PPO-pretrained on coinrun-easy) -> state embeddings.
+  use_pixel_obs: true
+  pixel_obs_shape: [64, 64, 3]
+  pixel_encoder_type: procgen_impala
+  encoder_trainable: false
+  encoder_init: pretrained        # pretrained (warm-start, frozen) | random (from scratch)
+  freeze_encoder_after: 10000     # moot when encoder_trainable=false (already frozen at load)
+  pretrained_encoder_path: "/home/bmancilla/archive/MaskDP/pretrained_encoders/procgen_coinrun_easy_encoder.pt"
+  # State reconstruction is always in embedding space (latent MAE); the single-stream
+  # model has no pixel-reconstruction decoder (no state_target=pixel option here).
+
+  # Discrete actions (classification): nn.Embedding + cross-entropy head.
+  discrete_actions: true
+  num_actions: 15                 # coinrun action space [0..14]
+  action_loss_weight: 0.03        # lambda balancing CE(action) vs MSE(state)
+  label_smoothing: 0.0            # applied ONLY to the action CE (ablatable)
+
+  # Regularization: single-stream uses plain Adam (NO weight decay) + these dropouts.
+  # For reg experiments, raise resid_pdrop / attn_pdrop via CLI.
+  embd_pdrop: 0
+  resid_pdrop: 0
+  attn_pdrop: 0
+  pe: 'fixed'
+  loss: 'total'
+  norm: 'l2'
