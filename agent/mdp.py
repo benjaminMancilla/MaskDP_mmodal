@@ -444,14 +444,56 @@ class MaskedDPAgent:
         # models
         self.model = MaskedDP(obs_shape[0], action_shape[0], transformer_cfg).to(device)
         self.mask_ratio = mask_ratio
-        # optimizers
-        trainable_params = [p for p in self.model.parameters() if p.requires_grad]
-        self.opt = torch.optim.Adam(trainable_params, lr=lr)
+        # optimizers: decoupled weight decay (AdamW), applied ONLY to 2D weights
+        # (Linear/Conv). Biases, LayerNorm, Embedding, standalone params and the
+        # (frozen) pixel encoder get weight_decay=0. Mechanism matches the multi-stream.
+        self.weight_decay = float(getattr(transformer_cfg, "weight_decay", 0.0))
+        decay, no_decay = self._classify_params()
+        param_groups = [
+            {"params": decay, "weight_decay": self.weight_decay},
+            {"params": no_decay, "weight_decay": 0.0},
+        ]
+        self.opt = torch.optim.AdamW(param_groups, lr=lr)
+        print(f"[Optimizer] AdamW — {len(decay)} decay / {len(no_decay)} no_decay "
+              f"tensors (weight_decay={self.weight_decay})")
         print(
             "number of parameters: %e", sum(p.numel() for p in self.model.parameters())
         )
 
         self.train()
+
+    def _classify_params(self):
+        # 2D weights (Linear/Conv) -> weight decay; everything else (bias, LayerNorm,
+        # Embedding, standalone nn.Parameter like mask_token) -> no decay. The pixel
+        # encoder is never decayed (matches the multi-stream). Frozen params skipped.
+        decay_modules = (nn.Linear, nn.Conv1d, nn.Conv2d, nn.Conv3d)
+        no_decay_modules = (nn.LayerNorm, nn.Embedding)
+
+        pixel_encoder_ids = set()
+        if self.model.pixel_encoder is not None:
+            pixel_encoder_ids = {p.data_ptr() for p in self.model.pixel_encoder.parameters()}
+
+        decay, no_decay = [], []
+        seen = set()
+        for _, module in self.model.named_modules():
+            for pn, p in module.named_parameters(recurse=False):
+                if not p.requires_grad:
+                    continue
+                ptr = p.data_ptr()
+                if ptr in seen:
+                    continue
+                seen.add(ptr)
+                if ptr in pixel_encoder_ids:
+                    no_decay.append(p)
+                elif pn.endswith("bias"):
+                    no_decay.append(p)
+                elif isinstance(module, no_decay_modules):
+                    no_decay.append(p)
+                elif isinstance(module, decay_modules) and pn.endswith("weight"):
+                    decay.append(p)
+                else:
+                    no_decay.append(p)
+        return decay, no_decay
 
     def train(self, training=True):
         self.training = training
