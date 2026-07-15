@@ -38,21 +38,11 @@ transformer_cfg:
   min_keep_states:  1         # minimun of states when dropout
   min_keep_actions: 0         # minimun of actions when dropout
 
-  # Early fusion encoder
-  mlp_ratio: 4
-  use_early_fusion: false
-
-  # MLP adapter (finetuning)
-  use_adapter_mlp: false
-  adapter_mlp_ratio: 2          # hidden_dim = n_embd * ratio
-  adapter_mlp_layers: 2
-  adapter_mlp_norm: true
-  adapter_mlp_residual: true
 
   # This stays the same
   embd_pdrop: 0
-  weight_decay: 0.01                                  # Decoupled AdamW. 2D matrices only (Linear/Conv)
-  dropout: 0.1                                       # attn_pdrop/resid_pdrop/mlp_pdrop
+  weight_decay: 0.00                                  # Decoupled AdamW. 2D matrices only (Linear/Conv)
+  dropout: 0.0                                       # attn_pdrop/resid_pdrop/mlp_pdrop
   attn_pdrop: ${agent.transformer_cfg.dropout}        # dropout on attention weights (post-softmax), self- and cross-attention
   resid_pdrop: ${agent.transformer_cfg.dropout}       # residual/projection dropout, output of each sub-layer before the residual connection
   mlp_pdrop: ${agent.transformer_cfg.dropout}         # dropout within the FFN of each block, right after the activation (GELU)
@@ -81,7 +71,6 @@ transformer_cfg:
   action_loss_weight: 0.03     # lambda for balancing MSE(state) vs CE(action) in the total loss.
   use_decoder_valid_mask: true # neutralizes padding tokens with mask tokens and blocks attention by a block-diagonal mask
 
-train_mode: 'joint'           # 'joint' | 'state_only' | 'action_only'
 
 #freeze_schedule: {}
 
@@ -93,7 +82,3 @@ freeze_schedule:
   # action_embed:          [0, 40000000]
   # action_encoder_blocks: [0, 40000000]
   # action_encoder_norm:   [0, 40000000]
-
-  # early_fusion_blocks:   [0, 40000000]
-  # fusion_blocks:         [0, 40000000]
-  # decoder_blocks:        [0, 40000000]
