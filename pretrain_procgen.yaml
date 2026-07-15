@@ -1,0 +1,96 @@
+defaults:
+  - agent: mdp_procgen
+  - override hydra/launcher: submitit_local
+  - _self_
+
+# task settings
+task: coinrun
+discount: 0.99
+
+# no live environment: pure offline pretraining (Procgen has no dm_control env)
+use_live_env: false
+
+# dataset convention — THE FIX. Procgen coinrun was converted WITH a dummy first
+# action, but must be sampled with the no-dummy alignment. has_dummy_transition=true
+# shifts observations back one index so obs[k] <-> action[k]; running with =false
+# reproduces the inverse-dynamics bug (a_{t-1} from s_t). DO NOT change to false.
+has_dummy_transition: true
+
+# train settings
+num_grad_steps: 800010
+log_every_steps: 1000
+
+# DMC eval DISABLED (gated off by use_live_env=false)
+eval_every_steps: 25000
+num_eval_episodes: 10
+use_return_eval: false
+goal_buffer_dir: null
+
+# Return validation — Procgen BCT eval during training
+use_bct_eval: true
+bct_env_name: ${task}
+bct_distribution_mode: easy
+bct_eval_episodes: 50
+bct_eval_every_epochs: 5      # 1 epoch = round(1e6 / batch_size) steps
+bct_eval_K: null             # null -> uses transformer_cfg.traj_length (full context window)
+bct_eval_temperature: 1.0
+bct_eval_sample: true
+bct_splits:
+  train:
+    start_level: 0
+    num_levels: 200
+  val:
+    start_level: 200
+    num_levels: 50
+  test:
+    start_level: 250
+    num_levels: 0
+
+steps_per_epoch: null
+
+# Early stopping (default OFF: fixed-list snapshots incl. the final 800k, per the
+# thesis decision rule of comparing the final snapshot, not snapshot_best)
+early_stop: false
+early_stop_wait_evals: 20
+early_stop_min_delta: 0.1
+early_stop_strict: true
+early_stop_init_best_return: null
+early_stop_init_waited_evals: 0
+
+# snapshot (separate dir from the multi-stream arm)
+snapshots: [0, 78125, 156250, 234375, 312500, 390625, 468750, 546875, 625000, 703125, 781250, 800000]
+snapshot_dir: /home/bmancilla/archive/MaskDP/maskdp_snapshots_procgen_unimodal/
+
+# resume
+resume: false
+resume_dir: none
+resume_step: 0
+
+# dataset TRAIN (same converted coinrun npz as the multi-stream arm)
+use_raw_replay_dir: true
+replay_buffer_dir: /path/to/your/procgen/coinrun/dataset  # AJUSTAR antes de correr
+replay_buffer_size: 2000000
+replay_buffer_num_workers: 16
+batch_size: ${agent.batch_size}
+train_file_split: "all"
+train_ratio: 0.8
+eval_ratio: 0.1
+bc_ratio: 0.1
+
+# pixel observation
+obs_type: pixels
+frame_stack: 1
+
+# misc
+seed: 1
+device: cuda
+save_video: false
+use_tb: true
+use_wandb: true
+project: maskdp-procgen-unimodal
+notes: "single-stream MaskDP on coinrun, offline-only, discrete actions (unimodal arm)"
+exp_name: procgen_coinrun_unimodal_placeholder
+
+hydra:
+  run:
+    dir: /home/bmancilla/scratch/maskdp_runs/${now:%Y.%m.%d}/${now:%H%M%S}_${agent.name}_${task}

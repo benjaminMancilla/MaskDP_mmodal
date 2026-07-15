@@ -1,0 +1,35 @@
+defaults:
+  - agent: mdp_bct
+  - _self_
+
+# task
+env_name: coinrun
+distribution_mode: easy
+
+# Fixed Meta protocol splits for coinrun 1M expert level_200:
+# dataset saw levels 0-199 (easy) -> train = held-in, val = intermediate held-out
+# levels (known distribution), test = the rest of Procgen's infinite distribution.
+splits:
+  train:
+    start_level: 0
+    num_levels: 200
+  val:
+    start_level: 200
+    num_levels: 50
+  test:
+    start_level: 250
+    num_levels: 0   # 0 = the rest of the infinite distribution (unbounded)
+
+# eval (raise to 300 for the final decision number, per the thesis protocol)
+num_episodes: 100
+
+# checkpoints to evaluate -- use agent.path for a single one, or this list for several
+eval_snapshots: []
+
+# misc
+seed: 1
+device: cuda
+use_wandb: true
+project: maskdp-procgen-bct-eval
+notes: "single-stream BCT closed-loop eval, comparable vs the multi-stream arm"
+exp_name: bct_eval_coinrun_easy
