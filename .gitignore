@@ -13,3 +13,7 @@ outputs/
 diagnose_out/
 out/
 diagnostics/
+CLAUDE.md
+claude/
+.claude
+cluster/
