@@ -47,7 +47,17 @@ class MaskedDP(nn.Module):
                 f"75A/25S ratio, min_states={self.min_keep_states}, min_actions={self.min_keep_actions})")
 
         print("norm", self.norm)
-        
+
+        # -- Discrete actions (classification) vs continuous (regression) --
+        self.discrete_actions   = bool(getattr(config, "discrete_actions", False))
+        self.num_actions        = int(getattr(config, "num_actions", 0))
+        self.action_loss_weight = float(getattr(config, "action_loss_weight", 1.0))
+        self.label_smoothing    = float(getattr(config, "label_smoothing", 0.0))
+        if self.discrete_actions:
+            assert self.num_actions > 0, "discrete_actions=True requires num_actions > 0"
+            print(f"Discrete actions ENABLED: num_actions={self.num_actions}, "
+                  f"action_loss_weight={self.action_loss_weight}, label_smoothing={self.label_smoothing}")
+
         self.use_pixel_obs = getattr(config, "use_pixel_obs", False)
         if self.use_pixel_obs:
             pixel_obs_shape = tuple(config.pixel_obs_shape)
@@ -106,7 +116,10 @@ class MaskedDP(nn.Module):
             self.pixel_encoder = None
             self.state_embed = nn.Linear(obs_dim, self.n_embd)
 
-        self.action_embed = nn.Linear(action_dim, self.n_embd)
+        if self.discrete_actions:
+            self.action_embed = nn.Embedding(self.num_actions, self.n_embd)
+        else:
+            self.action_embed = nn.Linear(action_dim, self.n_embd)
         self.encoder_blocks = nn.ModuleList(
             [Block(config) for _ in range(config.n_enc_layer)]
         )
@@ -122,12 +135,19 @@ class MaskedDP(nn.Module):
             [Block(config) for _ in range(config.n_dec_layer)]
         )
 
-        self.action_head = nn.Sequential(
-            nn.LayerNorm(self.n_embd),
-            nn.ReLU(inplace=True),
-            nn.Linear(self.n_embd, action_dim),
-            nn.Tanh(),
-        )  # decoder to patch
+        if self.discrete_actions:
+            self.action_head = nn.Sequential(
+                nn.LayerNorm(self.n_embd),
+                nn.ReLU(inplace=True),
+                nn.Linear(self.n_embd, self.num_actions),
+            )  # logits over discrete actions (no Tanh)
+        else:
+            self.action_head = nn.Sequential(
+                nn.LayerNorm(self.n_embd),
+                nn.ReLU(inplace=True),
+                nn.Linear(self.n_embd, action_dim),
+                nn.Tanh(),
+            )  # decoder to patch
         self.state_pred_dim = self.n_embd if self.use_pixel_obs else obs_dim
         self.state_head = nn.Sequential(
             nn.LayerNorm(self.n_embd),
@@ -233,7 +253,13 @@ class MaskedDP(nn.Module):
 
         batch_size, T = states.shape[0], states.shape[1]
         s_emb = self._embed_states(states)
-        a_emb = self.action_embed(actions)
+        if self.discrete_actions:
+            a_idx = actions.long()
+            if a_idx.dim() == 3 and a_idx.size(-1) == 1:
+                a_idx = a_idx.squeeze(-1)          # [B, T, 1] -> [B, T]
+            a_emb = self.action_embed(a_idx)       # [B, T, n_embd]
+        else:
+            a_emb = self.action_embed(actions)
 
         x = (
             torch.stack([s_emb, a_emb], dim=1)
@@ -298,27 +324,57 @@ class MaskedDP(nn.Module):
 
         return s, a
 
-    def forward_loss(self, target_s, target_a, pred_s, pred_a, mask):
+    def forward_loss(self, target_s, target_a, pred_s, pred_a, mask, label_smoothing=0.0):
+        # label_smoothing: applied ONLY to the action Cross-Entropy (discrete actions).
         batch_size, T, _ = target_s.size()
-        # apply normalization
+        # State target normalization
         if self.norm == "l2":
-            target_s = target_s / torch.norm(target_s, dim=-1, keepdim=True)
+            # clamp avoids 0/0 -> NaN when target_s is an exact-zero embedding
+            target_s = target_s / torch.norm(target_s, dim=-1, keepdim=True).clamp(min=1.0e-6)
         elif self.norm == "mae":
             mean = target_s.mean(dim=-1, keepdim=True)
             var = target_s.var(dim=-1, keepdim=True)
             target_s = (target_s - mean) / (var + 1.0e-6) ** 0.5
 
+        # --- State: MSE per dim -> per token ---
         loss_s = (pred_s - target_s) ** 2
-        loss_a = (pred_a - target_a) ** 2
-        loss = (
-            torch.stack([loss_s.mean(dim=-1), loss_a.mean(dim=-1)], dim=1)
-            .permute(0, 2, 1)
-            .reshape(batch_size, 2 * T)
-        )
-        masked_loss = (loss * mask).sum() / mask.sum()  # mean loss on removed patches
-        loss_s = loss_s.mean()
-        loss_a = loss_a.mean()
-        return masked_loss, loss_s, loss_a
+        loss_s_t = loss_s.mean(dim=-1)                     # [B, T]
+
+        # --- Action: MSE per token (continuous) or cross-entropy per token (discrete) ---
+        if self.discrete_actions:
+            A = pred_a.shape[-1]                           # num_actions
+            a_tgt = target_a.long()
+            if a_tgt.dim() == 3 and a_tgt.size(-1) == 1:
+                a_tgt = a_tgt.squeeze(-1)                  # [B, T, 1] -> [B, T]
+            loss_a_t = F.cross_entropy(
+                pred_a.reshape(batch_size * T, A),
+                a_tgt.reshape(batch_size * T),
+                reduction='none',
+                label_smoothing=label_smoothing,
+            ).reshape(batch_size, T)                        # [B, T] CE per token
+        else:
+            loss_a_t = ((pred_a - target_a) ** 2).mean(dim=-1)   # [B, T]
+
+        # Interleave [s0,a0,s1,a1,...] -> [B, 2T]; action term scaled by action_loss_weight
+        loss_tokens = torch.stack(
+            [loss_s_t, loss_a_t * self.action_loss_weight], dim=-1
+        ).reshape(batch_size, 2 * T)
+        masked_loss = (loss_tokens * mask).sum() / mask.sum().clamp(min=1.0e-8)
+
+        state_loss = loss_s_t.mean()
+        action_loss = loss_a_t.mean()
+
+        # Discrete action accuracy on the masked-for-recon action tokens only.
+        action_acc = None
+        if self.discrete_actions:
+            with torch.no_grad():
+                pred_idx = pred_a.argmax(dim=-1)           # [B, T]
+                action_removed = mask[:, 1::2].bool()      # 1 = action token masked
+                correct = (pred_idx == a_tgt)
+                action_acc = (correct[action_removed].float().mean()
+                              if action_removed.any() else pred_a.new_tensor(float('nan')))
+
+        return masked_loss, state_loss, action_loss, action_acc
 
 
 class MaskedDPAgent:
@@ -380,13 +436,14 @@ class MaskedDPAgent:
         pred_s, pred_a = self.model.forward_decoder(
             latent, ids_restore
         )  # [N, L, p*p*3]
-        mask_loss, state_loss, action_loss = self.model.forward_loss(
-            target_s, target_a, pred_s, pred_a, mask
+        mask_loss, state_loss, action_loss, action_acc = self.model.forward_loss(
+            target_s, target_a, pred_s, pred_a, mask,
+            label_smoothing=self.model.label_smoothing,
         )
         if self.config.loss == "masked":
             loss = mask_loss
         elif self.config.loss == "total":
-            loss = state_loss + action_loss
+            loss = state_loss + self.model.action_loss_weight * action_loss
         else:
             raise NotImplementedError
 
@@ -398,6 +455,8 @@ class MaskedDPAgent:
             metrics["mask_loss"] = mask_loss.item()
             metrics["state_loss"] = state_loss.item()
             metrics["action_loss"] = action_loss.item()
+            if action_acc is not None:
+                metrics["action_acc"] = action_acc.item()
 
         return metrics
 
@@ -416,14 +475,17 @@ class MaskedDPAgent:
         pred_s, pred_a = self.model.forward_decoder(
             latent, ids_restore
         )  # [N, L, p*p*3]
-        mask_loss, state_loss, action_loss = self.model.forward_loss(
-            target_s, target_a, pred_s, pred_a, mask
+        mask_loss, state_loss, action_loss, action_acc = self.model.forward_loss(
+            target_s, target_a, pred_s, pred_a, mask,
+            label_smoothing=0.0,
         )
 
         if self.use_tb:
             metrics["val_mask_loss"] = mask_loss.item()
             metrics["val_state_loss"] = state_loss.item()
             metrics["val_action_loss"] = action_loss.item()
+            if action_acc is not None:
+                metrics["val_action_acc"] = action_acc.item()
 
         return metrics
 
