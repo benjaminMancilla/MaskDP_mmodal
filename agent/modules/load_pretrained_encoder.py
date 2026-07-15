@@ -89,10 +89,93 @@ def verify_load(ckpt_path: str, obs_shape=(64, 64, 9), feature_dim=256):
     print("  Verification passed.")
 
 
+def load_procgen_impala(encoder, ckpt_path: str, freeze: bool = True, ignore_proj: bool = False):
+    """
+    Load a clean checkpoint into an ImpalaProcgenEncoder instance.
+    Loads convnet and projection
+    Expected ckpt format:
+        {
+            "convnet": <state_dict matching encoder.convnet>,
+            "projection": <state_dict matching encoder.projection>,
+            "feature_dim": int,
+            "cnn_style": "impala",
+            "source": str,            # e.g. "sgoodfriend/ppo-procgen-coinrun-easy"
+            "env_id": str,            # e.g. "coinrun"
+            "distribution_mode": str, # "easy" | "hard"
+        }
+    """
+    ckpt = torch.load(ckpt_path, map_location="cpu")
+
+    if not ignore_proj and "projection" in ckpt:
+        ckpt_proj_weight = ckpt["projection"]["weight"]
+        if ckpt_proj_weight.shape[0] != encoder.projection.out_features:
+            print(f"  [load_procgen_impala] WARNING: feature_dim of IMPALA encoder ({encoder.projection.out_features}) "
+                  f"does not match with ({ckpt_proj_weight.shape[0]}). Forzing ignore_proj=True.")
+            ignore_proj = True
+
+    submodules_to_load = ["convnet"]
+    if not ignore_proj:
+        submodules_to_load.append("projection")
+    else:
+        print("  [load_procgen_impala] ignore_proj=True. [RANDOM PROJECTION LAYER])")
+
+    for submodule_name in submodules_to_load:
+        if submodule_name not in ckpt:
+            raise KeyError(
+                f"  [load_procgen_impala] ckpt at {ckpt_path} has no '{submodule_name}' "
+                f"key. Found keys: {list(ckpt.keys())}. Did you generate this file with "
+                f"extract_procgen_ckpt.py?"
+            )
+        submodule = getattr(encoder, submodule_name)
+        missing, unexpected = submodule.load_state_dict(ckpt[submodule_name], strict=True)
+        assert len(missing) == 0, f"  [load_procgen_impala] Missing keys in '{submodule_name}': {missing}"
+        assert len(unexpected) == 0, f"  [load_procgen_impala] Unexpected keys in '{submodule_name}': {unexpected}"
+
+    if freeze:
+        for p in encoder.convnet.parameters():
+            p.requires_grad = False
+        for p in encoder.projection.parameters():
+            p.requires_grad = False
+        print("  [load_procgen_impala] Convnet and projection frozen.")
+    else:
+        print("  [load_procgen_impala] Loaded, NOT frozen (fine-tune mode).")
+
+    print(
+        f"  [load_procgen_impala] Loaded from: {ckpt_path} "
+        f"(source: {ckpt.get('source', '?')}, env_id: {ckpt.get('env_id', '?')}, "
+        f"distribution_mode: {ckpt.get('distribution_mode', '?')})"
+    )
+    return encoder
+
+
+def verify_load_procgen(ckpt_path: str, obs_shape=(64, 64, 3), feature_dim=256):
+    """Quick sanity check: instantiate ImpalaProcgenEncoder, load weights, dummy forward."""
+    import sys
+    sys.path.insert(0, str(Path(__file__).parent))
+    from pixel_encoder import ImpalaProcgenEncoder
+
+    encoder = ImpalaProcgenEncoder(obs_shape, feature_dim)
+    load_procgen_impala(encoder, ckpt_path, freeze=True)
+
+    dummy = torch.zeros(2, 1, *obs_shape, dtype=torch.uint8)  # (B, T, H, W, C)
+    with torch.no_grad():
+        out = encoder(dummy)
+    print(f"  Forward OK: input {tuple(dummy.shape)} => output {tuple(out.shape)}")
+    assert out.shape == (2, 1, feature_dim), f"Unexpected output shape: {out.shape}"
+    print("  Verification passed.")
+
+
 if __name__ == "__main__":
     import argparse
     p = argparse.ArgumentParser()
     p.add_argument("--ckpt", required=True)
     p.add_argument("--obs_shape", nargs=3, type=int, default=[64, 64, 9])
+    p.add_argument(
+        "--kind", choices=["drqv2", "procgen_impala"], default="drqv2",
+        help="Which verification path to run.",
+    )
     args = p.parse_args()
-    verify_load(args.ckpt, obs_shape=tuple(args.obs_shape))
+    if args.kind == "drqv2":
+        verify_load(args.ckpt, obs_shape=tuple(args.obs_shape))
+    else:
+        verify_load_procgen(args.ckpt, obs_shape=tuple(args.obs_shape))

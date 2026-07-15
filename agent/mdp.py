@@ -10,7 +10,7 @@ from dm_control.utils import rewards
 from einops import rearrange, reduce, repeat
 from agent.modules.attention import Block, CausalSelfAttention
 from agent.modules.pixel_encoder import PixelEncoder
-from agent.modules.load_pretrained_encoder import load_drqbc_convnet
+from agent.modules.load_pretrained_encoder import load_drqbc_convnet, load_procgen_impala
 
 
 class MaskedDP(nn.Module):
@@ -51,14 +51,52 @@ class MaskedDP(nn.Module):
         self.use_pixel_obs = getattr(config, "use_pixel_obs", False)
         if self.use_pixel_obs:
             pixel_obs_shape = tuple(config.pixel_obs_shape)
+            self.pixel_obs_shape = pixel_obs_shape
             pixel_encoder_type = str(getattr(config, "pixel_encoder_type", "drqv2"))
+
+            encoder_trainable = bool(getattr(config, "encoder_trainable", False))
+            encoder_init = str(getattr(config, "encoder_init", "pretrained"))
+            if encoder_init not in ("pretrained", "random"):
+                raise ValueError(
+                    f"encoder_init must be 'pretrained' or 'random', got '{encoder_init}'"
+                )
+            print(f"[PixelEncoder] encoder_trainable={encoder_trainable}, encoder_init='{encoder_init}'")
+
             self.pixel_encoder = PixelEncoder(
                 pixel_obs_shape, self.n_embd, encoder_type=pixel_encoder_type
             )
-            # Load DrQ-V2 CNN V-D4RL weights
+
             pretrained_path = getattr(config, "pretrained_encoder_path", None)
-            if pretrained_path is not None:
-                load_drqbc_convnet(self.pixel_encoder, pretrained_path, freeze=True)
+            if encoder_init == "pretrained" and pretrained_path is not None:
+                # Dispatch by encoder_type: each pretrained checkpoint format
+                # (DrQ-v2 convnet-only vs. Procgen IMPALA convnet+projection).
+                # freeze=not encoder_trainable: frozen baseline OR trainable fine-tune.
+                if pixel_encoder_type == "drqv2":
+                    load_drqbc_convnet(self.pixel_encoder, pretrained_path, freeze=not encoder_trainable)
+                elif pixel_encoder_type == "procgen_impala":
+                    load_procgen_impala(self.pixel_encoder, pretrained_path, freeze=not encoder_trainable)
+                else:
+                    raise ValueError(
+                        f"No pretrained-weights loader registered for "
+                        f"pixel_encoder_type='{pixel_encoder_type}'. "
+                        f"Either add one in load_pretrained_encoder.py and dispatch "
+                        f"it here, or omit 'pretrained_encoder_path' to train "
+                        f"'{pixel_encoder_type}' from scratch."
+                    )
+            elif encoder_init == "random":
+                # Skip pretrained loading; apply freeze if encoder_trainable=False.
+                if not encoder_trainable:
+                    for p in self.pixel_encoder.parameters():
+                        p.requires_grad = False
+                print(
+                    f"  [PixelEncoder] encoder_init=random → random init "
+                    f"({'frozen' if not encoder_trainable else 'trainable'})."
+                )
+            else:
+                raise ValueError(
+                    f"pretrained_path is missing with 'pretrained' encoder_init"
+                )
+
             self.state_embed = nn.Identity()
             trainable = sum(p.numel() for p in self.pixel_encoder.parameters() if p.requires_grad)
             total = sum(p.numel() for p in self.pixel_encoder.parameters())
