@@ -1191,6 +1191,7 @@ class MaskedDPMultimodalAgent:
         # variable-length collation issues. T is already fully dynamic throughout
         # forward_encoder and forward_decoder (all shapes derived from states.size(1)),
         # so no other changes are needed.
+        T_eff = None
         if self.model.traj_lengths is not None and self.training:
             T_eff = self.model._sample_jitter_T()
             states  = states[:, :T_eff]
@@ -1254,6 +1255,8 @@ class MaskedDPMultimodalAgent:
         self.opt.step()
 
         if self.use_tb:
+            if T_eff is not None:
+                metrics["jitter_T_eff"] = T_eff
             metrics["mask_loss"] = mask_loss.item()
             metrics["state_loss"] = state_loss.item()
             metrics["action_loss"] = action_loss.item()
