@@ -237,16 +237,16 @@ class MaskedDP(nn.Module):
         batch_size, T_full = states.shape[0], states.shape[1]
         obs_dim = states.shape[2] if states.ndim == 3 else None
 
-        # Temporal Jitter: recortar secuencia a T_jitter
-        T_jitter = self._sample_jitter_length()
+        # Temporal Jitter: recortar secuencia a T_jitter (solo en training -- eval_validation
+        # debe medir siempre a T fijo, igual que en hier-procgen; ver
+        # contexto_diagnostico_claude_code.md).
+        T_jitter = self._sample_jitter_length() if self.training else None
         if T_jitter is not None and T_jitter < T_full:
-            # Offset aleatorio para no siempre tomar desde el inicio
-            max_offset = T_full - T_jitter
-            offset = np.random.randint(0, max_offset + 1)
-            states  = states[:, offset:offset + T_jitter, :]
-            actions = actions[:, offset:offset + T_jitter, :]
+            offset = 0
+            states  = states[:, :T_jitter, :]
+            actions = actions[:, :T_jitter, :]
             if valid_mask is not None:
-                valid_mask = valid_mask[:, offset:offset + T_jitter]
+                valid_mask = valid_mask[:, :T_jitter]
             T = T_jitter
         else:
             offset = 0
