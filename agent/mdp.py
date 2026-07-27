@@ -241,14 +241,16 @@ class MaskedDPMultimodal(nn.Module):
                 # Init Stream S
                 nn.init.zeros_(blk.cross_attn_s.proj.weight)
                 nn.init.zeros_(blk.cross_attn_s.proj.bias)
-                nn.init.zeros_(blk.mlp_s[2].weight)
-                nn.init.zeros_(blk.mlp_s[2].bias)
+                # index -2: mlp_pdrop Dropout (added for regularization) shifts the
+                # second Linear from [2] to [-2] (last module is the resid Dropout).
+                nn.init.zeros_(blk.mlp_s[-2].weight)
+                nn.init.zeros_(blk.mlp_s[-2].bias)
 
                 # Init Stream A
                 nn.init.zeros_(blk.cross_attn_a.proj.weight)
                 nn.init.zeros_(blk.cross_attn_a.proj.bias)
-                nn.init.zeros_(blk.mlp_a[2].weight)
-                nn.init.zeros_(blk.mlp_a[2].bias)
+                nn.init.zeros_(blk.mlp_a[-2].weight)
+                nn.init.zeros_(blk.mlp_a[-2].bias)
             elif isinstance(blk, CoAttentionBlockSharedMLP):
                 # Cross-attention output projections (same as CoAttentionBlock)
                 nn.init.zeros_(blk.cross_attn_s.proj.weight)
@@ -263,9 +265,9 @@ class MaskedDPMultimodal(nn.Module):
                 nn.init.zeros_(blk.attn.proj.weight)
                 nn.init.zeros_(blk.attn.proj.bias)
 
-                # Zero-init MLP Output Projection
-                nn.init.zeros_(blk.mlp[2].weight)
-                nn.init.zeros_(blk.mlp[2].bias)
+                # Zero-init MLP Output Projection (index -2: see mlp_s/mlp_a note above)
+                nn.init.zeros_(blk.mlp[-2].weight)
+                nn.init.zeros_(blk.mlp[-2].bias)
 
         # Estable Early Fusion with zero init
         # Same strategy as the fusion block
@@ -771,29 +773,93 @@ class MaskedDPMultimodalAgent:
 
         # models
         self.model = MaskedDPMultimodal(
-            obs_shape[0], 
-            action_shape[0], 
+            obs_shape[0],
+            action_shape[0],
             transformer_cfg,
             train_mode=train_mode
         ).to(device)
         self.mask_ratio = mask_ratio
+        # Decoupled weight decay (AdamW).
+        self.weight_decay = float(getattr(self.config, "weight_decay", 0.0))
         # optimizers
-        # Tag the initial group with target_lr so that warmup logic works correctly
+        # Tag every group with target_lr so that warmup logic works correctly
         # even when no freeze_schedule is active (full-model training with warmup).
         # When a freeze_schedule IS active, _rebuild_optimizer / _add_encoder_param_groups
         # will replace this at step 0 before any gradient is taken.
-        self.opt = torch.optim.Adam(
-            [{'params': list(self.model.parameters()), 'lr': lr, 'target_lr': lr, 'name': 'all_params'}]
-        )
+        param_groups, (od_len, ond_len, _, _) = self._build_param_groups(encoder_ids=set())
+        print(f"[Optimizer] AdamW — {od_len} decay / {ond_len} no_decay tensors "
+              f"(weight_decay={self.weight_decay})")
+        self.opt = torch.optim.AdamW(param_groups)
         print(
             "number of parameters: %e", sum(p.numel() for p in self.model.parameters())
         )
 
         self.train()
-        
+
     def set_module_requires_grad(self, module, requires_grad):
         for param in module.parameters():
             param.requires_grad = requires_grad
+
+    def _classify_params(self):
+        # 2D weights (Linear/Conv) -> weight decay; everything else (bias, LayerNorm,
+        # Embedding, standalone nn.Parameter like mask_token/enc_mask_token) -> no decay.
+        decay_modules = (nn.Linear, nn.Conv1d, nn.Conv2d, nn.Conv3d)
+        no_decay_modules = (nn.LayerNorm, nn.Embedding)
+
+        decay_ids, no_decay_ids = set(), set()
+        for _, module in self.model.named_modules():
+            for pn, p in module.named_parameters(recurse=False):
+                ptr = p.data_ptr()
+                if pn.endswith("bias"):
+                    no_decay_ids.add(ptr)
+                elif isinstance(module, no_decay_modules):
+                    no_decay_ids.add(ptr)
+                elif isinstance(module, decay_modules) and pn.endswith("weight"):
+                    decay_ids.add(ptr)
+                else:
+                    no_decay_ids.add(ptr)
+
+        return decay_ids, no_decay_ids
+
+    def _build_param_groups(self, encoder_ids):
+        """Builds AdamW param groups crossing decay/no-decay with encoder/other."""
+        decay_ids, no_decay_ids = self._classify_params()
+
+        encoder_decay, encoder_no_decay = [], []
+        other_decay, other_no_decay = [], []
+
+        for p in self.model.parameters():
+            if not p.requires_grad:
+                continue
+            ptr = p.data_ptr()
+            is_encoder = ptr in encoder_ids
+            is_decay = ptr in decay_ids
+
+            if is_encoder:
+                (encoder_decay if is_decay else encoder_no_decay).append(p)
+            else:
+                (other_decay if is_decay else other_no_decay).append(p)
+
+        param_groups = []
+        if other_decay:
+            param_groups.append({'params': other_decay, 'lr': self.lr, 'target_lr': self.lr,
+                                'weight_decay': self.weight_decay, 'name': 'fusion_decoder_decay'})
+        if other_no_decay:
+            param_groups.append({'params': other_no_decay, 'lr': self.lr, 'target_lr': self.lr,
+                                'weight_decay': 0.0, 'name': 'fusion_decoder_no_decay'})
+        if encoder_decay:
+            param_groups.append({'params': encoder_decay, 'lr': self.finetune_lr, 'target_lr': self.finetune_lr,
+                                'weight_decay': self.weight_decay, 'name': 'encoders_decay'})
+        if encoder_no_decay:
+            param_groups.append({'params': encoder_no_decay, 'lr': self.finetune_lr, 'target_lr': self.finetune_lr,
+                                'weight_decay': 0.0, 'name': 'encoders_no_decay'})
+
+        if not param_groups:
+            param_groups = [{'params': [], 'lr': self.lr, 'target_lr': self.lr,
+                            'weight_decay': self.weight_decay, 'name': 'empty'}]
+
+        stats = (len(other_decay), len(other_no_decay), len(encoder_decay), len(encoder_no_decay))
+        return param_groups, stats
 
     def _get_encoder_param_ids(self):
         # Used to distinguish encoder params from fusion/decoder params when building groups.
@@ -806,44 +872,16 @@ class MaskedDPMultimodalAgent:
         return ids
 
     def _rebuild_optimizer(self):
-        """Rebuild optimizer with only trainable parameters"""
+        """Rebuild optimizer with only trainable parameters (decay/no_decay x encoder/other)."""
         encoder_ids = self._get_encoder_param_ids()
-        encoder_params, other_params = [], []
-
-        for p in self.model.parameters():
-            if not p.requires_grad:
-                continue
-            if p.data_ptr() in encoder_ids:
-                encoder_params.append(p)
-            else:
-                other_params.append(p)
-
-        param_groups = []
-        if other_params:
-            param_groups.append({
-                'params': other_params,
-                'lr': self.lr,
-                'target_lr': self.lr,
-                'name': 'fusion_decoder',
-            })
-        if encoder_params:
-            param_groups.append({
-                'params': encoder_params,
-                'lr': self.finetune_lr,
-                'target_lr': self.finetune_lr,
-                'name': 'encoders',
-            })
-
-        # Fallback: nothing in either bucket (shouldn't happen, but be safe)
-        if not param_groups:
-            param_groups = [{'params': [], 'lr': self.lr, 'target_lr': self.lr, 'name': 'empty'}]
+        param_groups, (od_len, ond_len, ed_len, end_len) = self._build_param_groups(encoder_ids)
 
         print(
             f"[Optimizer] Full rebuild — "
-            f"{len(other_params)} fusion/decoder params @ lr={self.lr}, "
-            f"{len(encoder_params)} encoder params @ lr={self.finetune_lr}"
+            f"fusion/decoder: {od_len} decay / {ond_len} no_decay @ lr={self.lr}, "
+            f"encoders: {ed_len} decay / {end_len} no_decay @ lr={self.finetune_lr}"
         )
-        self.opt = torch.optim.Adam(param_groups)
+        self.opt = torch.optim.AdamW(param_groups)
 
     def _add_encoder_param_groups(self, newly_unfrozen_names):
         # Collect all param data_ptrs already tracked by the optimizer
@@ -852,31 +890,43 @@ class MaskedDPMultimodalAgent:
             for p in grp['params']:
                 existing_ids.add(p.data_ptr())
 
-        new_params = []
+        decay_ids, no_decay_ids = self._classify_params()
+
+        new_decay, new_no_decay = [], []
         for name in newly_unfrozen_names:
             module = getattr(self.model, name, None)
             if module is None:
                 continue
             for p in module.parameters():
                 if p.requires_grad and p.data_ptr() not in existing_ids:
-                    new_params.append(p)
+                    (new_decay if p.data_ptr() in decay_ids else new_no_decay).append(p)
 
-        if not new_params:
+        if not new_decay and not new_no_decay:
             print(
                 f"[Optimizer] _add_encoder_param_groups: no new params to add "
                 f"(already tracked or empty). Skipping."
             )
             return
 
-        self.opt.add_param_group({
-            'params': new_params,
-            'lr': self.finetune_lr,
-            'target_lr': self.finetune_lr,
-            'name': 'encoders',
-        })
+        if new_decay:
+            self.opt.add_param_group({
+                'params': new_decay,
+                'lr': self.finetune_lr,
+                'target_lr': self.finetune_lr,
+                'weight_decay': self.weight_decay,
+                'name': 'encoders_decay',
+            })
+        if new_no_decay:
+            self.opt.add_param_group({
+                'params': new_no_decay,
+                'lr': self.finetune_lr,
+                'target_lr': self.finetune_lr,
+                'weight_decay': 0.0,
+                'name': 'encoders_no_decay',
+            })
         print(
-            f"[Optimizer] add_param_group — {len(new_params)} encoder params "
-            f"@ lr={self.finetune_lr}. Fusion/decoder Adam state PRESERVED."
+            f"[Optimizer] add_param_group — {len(new_decay)} decay + {len(new_no_decay)} no_decay "
+            f"encoder params @ lr={self.finetune_lr}. Fusion/decoder Adam state PRESERVED."
         )
 
     # ------------------------------------------------------------------

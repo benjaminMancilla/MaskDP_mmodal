@@ -49,10 +49,14 @@ transformer_cfg:
   adapter_mlp_norm: true
   adapter_mlp_residual: true
 
-  # This stays the same
+  # Regularization dropout: ONE knob feeds attn/resid/mlp (same mechanism as Procgen)
+  dropout: 0
+  attn_pdrop: ${agent.transformer_cfg.dropout}
+  resid_pdrop: ${agent.transformer_cfg.dropout}
+  mlp_pdrop: ${agent.transformer_cfg.dropout}
   embd_pdrop: 0
-  resid_pdrop: 0
-  attn_pdrop: 0
+  # Decoupled AdamW weight decay (2D matrices only).
+  weight_decay: 0
   pe: 'fixed'
   loss: 'total'
   norm: 'l2'
