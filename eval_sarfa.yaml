@@ -1,0 +1,55 @@
+# task
+env_name: coinrun
+distribution_mode: easy   # mandatory 'easy'
+
+# Models to compare. Each entry is an independent snapshot.
+# The agent auto-configures from the payload's config (architecture, dims, etc.).
+# Example format:
+#
+# models:
+#   - name: hier_seed1
+#     arch: hier
+#     seed: 1
+#     path: /path/to/snapshot_hier_seed1_781251.pt
+#   - name: hier_seed2
+#     arch: hier
+#     seed: 2
+#     path: /path/to/snapshot_hier_seed2_781251.pt
+#   - name: uni_seed1
+#     arch: uni
+#     seed: 1
+#     path: /path/to/snapshot_uni_seed1_781251.pt
+models: []
+
+# Reference levels (test/OOD, >= 250) to record the trajectories.
+# Must be an EXPLICIT list so all models visit the exact same levels.
+# Example for ~46 levels:
+# levels: [250, 251, 252, ..., 295]
+levels: []
+
+# Sampled states per (model, level), selected as fractional quantiles of the episode 
+# (not all timesteps).
+states_per_episode: 30
+
+# Perturbation settings. Calibrate before setting these values for a full run.
+perturbation:
+  d: 4
+  radius: 4.0
+  blur_sigma: 3.0
+  mode: occlude   # occlude | searchlight
+
+# Temporal saliency: GLOBAL frame blur at buffer position j. 
+# null -> reuses perturbation.blur_sigma.
+temporal_blur_sigma: null
+
+# Output: npz file per cell of the M x M matrix in `output_dir`
+# (default: first snapshot's folder in `models` / "sarfa")
+output_dir: null
+
+# misc
+seed: 1
+device: cuda
+use_wandb: true
+project: maskdp-mm-procgen-sarfa
+notes: "Hierarchical vs unimodal SARFA, counterbalanced M x M design"
+exp_name: sarfa_coinrun
