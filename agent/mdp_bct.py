@@ -118,6 +118,105 @@ class BCTEvalAgent:
         _, pred_a = self.mdp.forward_decoder(x_keep, ids_restore, valid_tok=None)   # (1, K, num_actions)
         return pred_a[0]                                             # (K, num_actions)
 
+    def _embed_state_stream(self, obs_list, n_s, override_index, override_batch, B):
+        """
+        Embeds the current obs-buffer contents into (B, n_s, D).
+
+        Read-only over `self._obs_buffer`. If `override_batch` is None, embeds
+        the buffer as-is with B=1. Otherwise, `override_batch` replaces the frame
+        at `override_index`; the remaining frames are embedded once and
+        broadcasted to all B rows.
+        """
+        D = self.mdp.n_embd
+
+        if override_batch is None:
+            obs_np = np.stack(obs_list, axis=0)                                # (n_s, H, W, C)
+            obs_t = torch.as_tensor(obs_np, dtype=torch.float32, device=self.device).unsqueeze(0)
+            return self.mdp._embed_states(obs_t)                               # (1, n_s, D)
+
+        override_t = torch.as_tensor(override_batch, dtype=torch.float32, device=self.device)  # (B, H, W, C)
+        override_embed = self.mdp._embed_states(override_t)                    # (B, D)
+
+        s_emb = override_embed.new_empty(B, n_s, D)
+        s_emb[:, override_index, :] = override_embed
+
+        intact_positions = [i for i in range(n_s) if i != override_index]
+        if intact_positions:
+            intact_np = np.stack([obs_list[i] for i in intact_positions], axis=0)  # (n_s-1, H, W, C)
+            intact_t = torch.as_tensor(intact_np, dtype=torch.float32, device=self.device).unsqueeze(0)
+            intact_embed = self.mdp._embed_states(intact_t)                    # (1, n_s-1, D)
+            s_emb[:, intact_positions, :] = intact_embed.expand(B, -1, -1)
+
+        return s_emb
+
+    def _forward_batched(self, override_index=None, override_batch=None, B=1):
+        """
+        Batched variant of `_forward()`. Read-only over the internal buffers.
+        With `override_batch=None` it reproduces the standard `_forward()` (B=1).
+        Otherwise, `override_batch` independently replaces the frame at
+        `override_index` per batch row.
+
+        Returns (B, K, num_actions) raw logits (no temperature applied).
+        """
+        T = self.K
+        D = self.mdp.n_embd
+        n_s = len(self._obs_buffer)
+        n_a = len(self._action_buffer)
+        len_keep = n_s + n_a
+
+        obs_list = list(self._obs_buffer)
+        s_emb = self._embed_state_stream(obs_list, n_s, override_index, override_batch, B)  # (B, n_s, D)
+
+        x_keep = s_emb.new_empty(B, len_keep, D)
+        x_keep[:, 0::2] = s_emb
+        if n_a > 0:
+            act_np = np.stack(list(self._action_buffer))             # (n_a,) ints
+            act_t = torch.as_tensor(act_np, dtype=torch.long, device=self.device).unsqueeze(0).expand(B, -1)
+            a_emb = self.mdp.action_embed(act_t)                     # (B, n_a, D)
+            x_keep[:, 1::2] = a_emb
+
+        x_keep = x_keep + self.mdp.pos_embed[:, :len_keep, :]
+        for blk in self.mdp.encoder_blocks:
+            x_keep = blk(x_keep, self.mdp.attn_mask)                 # broadcasts against B, no expand needed
+        x_keep = self.mdp.encoder_norm(x_keep)
+
+        ids_restore = torch.arange(2 * T, device=self.device).unsqueeze(0).expand(B, -1)
+        _, pred_a = self.mdp.forward_decoder(x_keep, ids_restore, valid_tok=None)   # (B, K, num_actions)
+        return pred_a
+
+    def logits_for(self, obs_override=None, override_index=-1):
+        """
+        Returns raw logits (num_actions,) for the current buffer contents,
+        optionally replacing ONE frame in the observation buffer.
+
+        obs_override:   (H, W, C) or (N, H, W, C) -- perturbed frame(s), in [0, 255].
+        override_index: Position in the obs buffer to replace.
+                        -1 for the current frame (spatial saliency) or
+                        j < n_s-1 for past frames (temporal saliency).
+        """
+        n_s = len(self._obs_buffer)
+        assert n_s > 0, "logits_for() requires a non-empty obs buffer (call act() at least once after reset())."
+
+        idx = override_index if override_index >= 0 else n_s + override_index
+        assert 0 <= idx < n_s, f"override_index={override_index} out of range for n_s={n_s}."
+
+        if obs_override is None:
+            with torch.no_grad():
+                pred_a = self._forward_batched(override_index=None, override_batch=None, B=1)
+            return pred_a[0, n_s - 1]                                          # (num_actions,)
+
+        override_arr = np.asarray(obs_override)
+        single = override_arr.ndim == 3
+        if single:
+            override_arr = override_arr[None]                                 # (1, H, W, C)
+        B = override_arr.shape[0]
+
+        with torch.no_grad():
+            pred_a = self._forward_batched(override_index=idx, override_batch=override_arr, B=B)  # (B, K, num_actions)
+
+        logits = pred_a[:, n_s - 1]                                            # (B, num_actions)
+        return logits[0] if single else logits
+
     def act(self, obs):
         obs_frame = obs[0] if obs.ndim == 4 else obs   # (H, W, C)
         self._obs_buffer.append(obs_frame)
