@@ -233,6 +233,16 @@ def compute_state_saliency(agent, state, perturb_cfg, K_max, temporal_blur_sigma
     }
 
 
+def load_trajectory_states(out_root, name):
+    path = out_root / f"states_{name}.pkl"
+    assert path.exists(), (
+        f"Missing {path}. Run phase=record for '{name}' first -- from whichever "
+        f"checkout owns that model's architecture -- before phase=evaluate."
+    )
+    with open(path, "rb") as f:
+        return pickle.load(f)["levels"]
+
+
 @hydra.main(config_path=".", config_name="eval_sarfa")
 def main(cfg):
     work_dir = Path.cwd()
@@ -247,10 +257,19 @@ def main(cfg):
         "'hard' shifts states out of distribution."
     )
     assert len(cfg.models) >= 2, "At least 2 models are required in `models` for comparison."
-    assert len(cfg.levels) >= 1, (
-        "`levels` cannot be empty. Set an EXPLICIT list of levels so "
-        "all models visit the same levels."
+    assert cfg.phase in ("record", "evaluate", "both"), f"phase must be record|evaluate|both, got '{cfg.phase}'"
+    assert cfg.get("output_dir", None), (
+        "`output_dir` is required (no default derived from a single model's path) -- "
+        "hier and uni snapshots live under different directories, so this run needs "
+        "an explicit shared location both checkouts can read/write."
     )
+
+    only_arch = set(cfg.only_arch) if cfg.get("only_arch", None) else None
+    if cfg.phase != "record":
+        assert len(cfg.levels) >= 1, (
+            "`levels` cannot be empty. Set an EXPLICIT list of levels so "
+            "all models visit the same levels."
+        )
 
     obs_shape = (64, 64, 3)  # procgen; generalize if another env_name is used
     action_shape = (1,)
@@ -258,6 +277,13 @@ def main(cfg):
     agents = {}
     model_meta = {}
     for m in cfg.models:
+        model_meta[m.name] = {
+            "arch": str(m.arch),
+            "seed": int(m.seed),
+            "checkpoint_step": parse_checkpoint_step(m.path),
+        }
+        if only_arch is not None and str(m.arch) not in only_arch:
+            continue
         print(f"\n[SARFA] Loading model '{m.name}' (arch={m.arch}, seed={m.seed}): {m.path}")
         agent = BCTEvalAgentMultimodal(
             obs_shape=obs_shape,
@@ -268,17 +294,21 @@ def main(cfg):
             path=m.path,
         )
         agents[m.name] = agent
-        model_meta[m.name] = {
-            "arch": str(m.arch),
-            "seed": int(m.seed),
-            "checkpoint_step": parse_checkpoint_step(m.path),
-        }
+
+    assert agents, f"only_arch={only_arch} matched none of the models in `models`."
 
     K_values = {name: agent.K for name, agent in agents.items()}
     assert len(set(K_values.values())) == 1, (
         f"Models have different K values: {K_values}. They must share "
         "the same K to be comparable. Set `K` explicitly in each agent if needed."
     )
+    expected_K = cfg.get("expected_K", None)
+    if expected_K is not None:
+        for name, k in K_values.items():
+            assert k == expected_K, (
+                f"Model '{name}' has K={k}, expected K={expected_K} (cross-checkout "
+                "consistency check -- the other architecture's models must match too)."
+            )
 
     exp_name = str(cfg.exp_name)
     wandb_config = omegaconf.OmegaConf.to_container(cfg, resolve=True, throw_on_missing=True)
@@ -294,39 +324,46 @@ def main(cfg):
     perturb_cfg = cfg.perturbation
     temporal_blur_sigma = cfg.get("temporal_blur_sigma", None)  # None -> reuses perturb_cfg.blur_sigma
     K_shared = next(iter(K_values.values()))
-    out_root = Path(cfg.output_dir) if cfg.get("output_dir", None) else Path(cfg.models[0].path).parent / "sarfa"
+    out_root = Path(cfg.output_dir)
     out_root.mkdir(parents=True, exist_ok=True)
 
-    # 1. Record M reference trajectories, one per model, on the SAME levels.
-    trajectories = {name: {} for name in agents}
-    for level in cfg.levels:
-        for name, agent in agents.items():
-            print(f"[SARFA] Recording reference trajectory: model={name} level={level}")
-            steps = record_reference_trajectory(agent, cfg.env_name, level, cfg.distribution_mode)
-            selected = select_quantile_states(steps, cfg.states_per_episode)
-            trajectories[name][level] = selected
-            print(f"    episode of {len(steps)} steps -> {len(selected)} sampled states")
+    if cfg.phase in ("record", "both"):
+        trajectories = {name: {} for name in agents}
+        for level in cfg.levels:
+            for name, agent in agents.items():
+                print(f"[SARFA] Recording reference trajectory: model={name} level={level}")
+                steps = record_reference_trajectory(agent, cfg.env_name, level, cfg.distribution_mode)
+                selected = select_quantile_states(steps, cfg.states_per_episode)
+                trajectories[name][level] = selected
+                print(f"    episode of {len(steps)} steps -> {len(selected)} sampled states")
 
-    # Persist raw snapshots per trajectory (env_state/obs_buffer/action_buffer)
-    # BEFORE discarding them. Used for counterfactual branching without re-recording.
-    for name in agents:
-        states_path = out_root / f"states_{name}.pkl"
-        with open(states_path, "wb") as f:
-            pickle.dump({
-                "levels": trajectories[name],  # {level: [state, ...]}
-                "arch": model_meta[name]["arch"],
-                "seed": model_meta[name]["seed"],
-                "checkpoint_step": model_meta[name]["checkpoint_step"],
-            }, f)
-        print(f"[SARFA] Raw states of '{name}' -> {states_path}")
+        for name in agents:
+            states_path = out_root / f"states_{name}.pkl"
+            with open(states_path, "wb") as f:
+                pickle.dump({
+                    "levels": trajectories[name],  # {level: [state, ...]}
+                    "arch": model_meta[name]["arch"],
+                    "seed": model_meta[name]["seed"],
+                    "checkpoint_step": model_meta[name]["checkpoint_step"],
+                }, f)
+            print(f"[SARFA] Raw states of '{name}' -> {states_path}")
 
-    # 2. Evaluate the M models on the M state sets -> M x M matrix
-    #    (Spatial phase) + temporal vector per state (Temporal phase, same base forward).
+    if cfg.phase == "record":
+        print("\n[SARFA] phase=record done. Run phase=evaluate (from every checkout, "
+              "after every architecture's phase=record has completed) to build the "
+              "M x M matrix.")
+        if cfg.use_wandb:
+            wandb.finish()
+        return
+
+    # Evaluate
+    all_trajectories = {m.name: load_trajectory_states(out_root, m.name) for m in cfg.models}
+
     n_cells = 0
-    for traj_name in agents:
+    for traj_name, traj_states in all_trajectories.items():
         for eval_name, eval_agent in agents.items():
             records = []
-            for level, states in trajectories[traj_name].items():
+            for level, states in traj_states.items():
                 for state in states:
                     result = compute_state_saliency(
                         eval_agent, state, perturb_cfg, K_max=K_shared,

@@ -21,6 +21,21 @@ distribution_mode: easy   # mandatory 'easy'
 #     path: /path/to/snapshot_uni_seed1_781251.pt
 models: []
 
+# Which architecture(s) to instantiate. Models outside this list are used for 
+# metadata/trajectory bookkeeping but are never instantiated. 
+# null -> no filter.
+only_arch: null   # e.g. [hier] or [uni]
+
+# record: roll out and persist trajectories for local models, then stop.
+# evaluate: read ALL trajectories from output_dir (must already exist) and 
+#           evaluate them using the local models.
+# both: record then evaluate in the same process.
+phase: both   # record | evaluate | both
+
+# Optional sanity check: asserts every local model's K equals this value 
+# to catch mismatches between runs.
+expected_K: null
+
 # Reference levels (test/OOD, >= 250) to record the trajectories.
 # Must be an EXPLICIT list so all models visit the exact same levels.
 # Example for ~46 levels:
@@ -42,8 +57,7 @@ perturbation:
 # null -> reuses perturbation.blur_sigma.
 temporal_blur_sigma: null
 
-# Output: npz file per cell of the M x M matrix in `output_dir`
-# (default: first snapshot's folder in `models` / "sarfa")
+# Output: npz file per cell of the M x M matrix, plus per-model states_*.pkl.
 output_dir: null
 
 # misc
