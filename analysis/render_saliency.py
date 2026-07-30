@@ -1,9 +1,12 @@
 import argparse
+import sys
 from pathlib import Path
 
 import numpy as np
 from PIL import Image
 from scipy.ndimage import zoom
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from analysis.select_qualitative_states import load_cell, load_states
 

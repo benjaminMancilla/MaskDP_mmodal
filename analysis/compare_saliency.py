@@ -1,10 +1,13 @@
 import argparse
 import pickle
+import sys
 from collections import defaultdict
 from pathlib import Path
 
 import numpy as np
 from scipy.stats import spearmanr
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from analysis.select_qualitative_states import load_cell
 
