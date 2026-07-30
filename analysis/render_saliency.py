@@ -35,22 +35,43 @@ def find_frame(states_by_level, level, t):
     raise KeyError(f"(level={level}, t={t}) not in the recorded states")
 
 
-def render_cell(output_dir, traj_name, eval_name, out_dir, map_key="answer_maps", zoom_px=4, limit=None):
+def render_cell(output_dir, traj_name, eval_name, out_dir, map_key="answer_maps", zoom_px=4, limit=None, gif=False, gif_duration_ms=300):
     cell = load_cell(output_dir, traj_name, eval_name)
     states_by_level = load_states(output_dir, traj_name)["levels"]
 
-    out_dir = Path(out_dir)
+    out_dir = Path(out_dir) / f"traj_{traj_name}__eval_{eval_name}"
     out_dir.mkdir(parents=True, exist_ok=True)
 
     n = len(cell["levels"]) if limit is None else min(limit, len(cell["levels"]))
+
+    by_level = {}
     for i in range(n):
         level, t = int(cell["levels"][i]), int(cell["timesteps"][i])
-        frame = find_frame(states_by_level, level, t)
-        blended = overlay_heatmap(frame, cell[map_key][i])
-        img = Image.fromarray(blended).resize((64 * zoom_px, 64 * zoom_px), Image.NEAREST)
-        img.save(out_dir / f"traj_{traj_name}__eval_{eval_name}__L{level}_t{t}.png")
+        by_level.setdefault(level, []).append((t, i))
 
-    print(f"{n} frames -> {out_dir}")
+    total = 0
+    for level, entries in by_level.items():
+        entries.sort()  # by t, so PNGs and the gif play in order
+        level_dir = out_dir / f"L{level}"
+        level_dir.mkdir(parents=True, exist_ok=True)
+
+        frames = []
+        for t, i in entries:
+            frame = find_frame(states_by_level, level, t)
+            blended = overlay_heatmap(frame, cell[map_key][i])
+            img = Image.fromarray(blended).resize((64 * zoom_px, 64 * zoom_px), Image.NEAREST)
+            img.save(level_dir / f"t{t:04d}.png")
+            frames.append(img)
+            total += 1
+
+        if gif and frames:
+            frames[0].save(
+                level_dir / "sequence.gif",
+                save_all=True, append_images=frames[1:],
+                duration=gif_duration_ms, loop=0,
+            )
+
+    print(f"{total} frames across {len(by_level)} levels -> {out_dir}")
 
 
 def main():
@@ -62,10 +83,15 @@ def main():
     parser.add_argument("--map-key", default="answer_maps", choices=["answer_maps", "dP_maps"])
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--zoom", type=int, default=4)
+    parser.add_argument("--gif", action="store_true", help="also save a per-level sequence.gif")
+    parser.add_argument("--gif-duration-ms", type=int, default=300)
     args = parser.parse_args()
 
     out_dir = args.out_dir or str(Path(args.output_dir) / "renders")
-    render_cell(args.output_dir, args.traj_name, args.eval_name, out_dir, args.map_key, args.zoom, args.limit)
+    render_cell(
+        args.output_dir, args.traj_name, args.eval_name, out_dir,
+        args.map_key, args.zoom, args.limit, args.gif, args.gif_duration_ms,
+    )
 
 
 if __name__ == "__main__":
