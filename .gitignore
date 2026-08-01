@@ -12,3 +12,8 @@ datasets/
 outputs/
 diagnostics_scripts/
 out/
+out_records/
+analysis/tests
+CLAUDE.md
+claude/
+cluster/
