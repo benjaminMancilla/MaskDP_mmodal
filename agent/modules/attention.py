@@ -43,11 +43,12 @@ class CrossAttention(nn.Module):
         self.resid_drop = nn.Dropout(config.resid_pdrop)
         self.proj = nn.Linear(config.n_embd, config.n_embd)
 
-    def forward(self, x, context, key_padding_mask=None):
+    def forward(self, x, context, key_padding_mask=None, tmp_att=None, return_att=False):
         # x: Query [B, T_x, C]
         # context: Key/Value [B, T_ctx, C]
         # key_padding_mask: [B, T_ctx] bool
-        
+        # tmp_att: optional [B, nh, T_x, T_ctx] override for the post-softmax attention
+
         B, T_x, C = x.size()
         B, T_ctx, _ = context.size()
 
@@ -58,7 +59,7 @@ class CrossAttention(nn.Module):
 
         # Attention (B, nh, T_x, T_ctx)
         att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
-        
+
         if key_padding_mask is not None:
             # Expand mask for broadcasting: [B, 1, 1, T_ctx]
             mask = key_padding_mask.unsqueeze(1).unsqueeze(2)
@@ -69,13 +70,20 @@ class CrossAttention(nn.Module):
             att = att.masked_fill(mask, 0.0)
         else:
             att = F.softmax(att, dim=-1)
-        
-        att = self.attn_drop(att)
-        
-        y = att @ v 
+
+        # tmp_att substitutes the real attention with an IG interpolation alpha*att.
+        # Must only be used in eval() (attn_drop is identity there); in train mode
+        # stochastic dropout would invalidate the substitution.
+        att_used = tmp_att if tmp_att is not None else att
+        att_used = self.attn_drop(att_used)
+
+        y = att_used @ v
         y = y.transpose(1, 2).contiguous().view(B, T_x, C)
-        
+
         y = self.resid_drop(self.proj(y))
+
+        if return_att or tmp_att is not None:
+            return y, att  # att = real attention, always (even if it was substituted)
         return y
 
 
@@ -114,11 +122,22 @@ class CoAttentionBlock(nn.Module):
             nn.Dropout(config.resid_pdrop),
         )
 
-    def forward(self, x_s, x_a, mask_s=None, mask_a=None):
+    def forward(self, x_s, x_a, mask_s=None, mask_a=None,
+                tmp_att_s=None, tmp_att_a=None, return_att=False):
         # Parallel Co-Attention between x_s and x_a
-        delta_s = self.cross_attn_s(self.ln1_s(x_s), self.ln1_a(x_a), key_padding_mask=mask_a)
-        delta_a = self.cross_attn_a(self.ln1_a(x_a), self.ln1_s(x_s), key_padding_mask=mask_s)
-        
+        norm_s = self.ln1_s(x_s)
+        norm_a = self.ln1_a(x_a)
+
+        need_att = return_att or (tmp_att_s is not None) or (tmp_att_a is not None)
+
+        out_s = self.cross_attn_s(norm_s, norm_a, key_padding_mask=mask_a,
+                                   tmp_att=tmp_att_s, return_att=need_att)
+        out_a = self.cross_attn_a(norm_a, norm_s, key_padding_mask=mask_s,
+                                   tmp_att=tmp_att_a, return_att=need_att)
+
+        delta_s, att_s = out_s if need_att else (out_s, None)
+        delta_a, att_a = out_a if need_att else (out_a, None)
+
         # Cross Attention (residual connection)
         x_s = x_s + delta_s
         x_a = x_a + delta_a
@@ -126,7 +145,9 @@ class CoAttentionBlock(nn.Module):
         # Feed Forward
         x_s = x_s + self.mlp_s(self.ln2_s(x_s))
         x_a = x_a + self.mlp_a(self.ln2_a(x_a))
-        
+
+        if need_att:
+            return x_s, x_a, att_s, att_a
         return x_s, x_a
 
 

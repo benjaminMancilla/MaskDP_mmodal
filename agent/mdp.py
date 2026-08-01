@@ -502,22 +502,26 @@ class MaskedDPMultimodal(nn.Module):
         return combined.squeeze(-1) > 0.5               # [B, len_keep] bool
 
     def forward_fusion(
-        self, 
-        s_encoded: torch.Tensor, 
-        a_encoded: torch.Tensor, 
+        self,
+        s_encoded: torch.Tensor,
+        a_encoded: torch.Tensor,
         ids_keep: torch.Tensor,
-        s_pad_mask=None, 
+        s_pad_mask=None,
         a_pad_mask=None,
+        tar_layer: int = None,          # ATTATTR: index into self.fusion_blocks to intervene on
+        tmp_att_s: torch.Tensor = None, # ATTATTR: override (alpha*A) for cross_attn_s at tar_layer
+        tmp_att_a: torch.Tensor = None, # ATTATTR: override for cross_attn_a at tar_layer
+        capture_att: bool = False,      # ATTATTR: True on the baseline pass (no override) to read real A
     ) -> torch.Tensor:
         """Optional fusion encoder over kept tokens (after separate state/action encoders).
 
         If `n_fuse_layer == 0` and `use_fusion_type_embed == False`, this is effectively an identity mapping
         (it just reconstructs the kept sequence in ids_keep order).
-        
+
         Multimodal fusion is done via either self-attention or co-attention blocks.
         """
- 
-        # --- CROSS ATTENTION ---       
+
+        # --- CROSS ATTENTION ---
         if self.fusion_type == 'cross':
             x_s = s_encoded
             x_a = a_encoded
@@ -529,16 +533,28 @@ class MaskedDPMultimodal(nn.Module):
                 # 0 states, 1 actions
                 type_ids_s = torch.zeros(B, L_s, dtype=torch.long, device=x_s.device)
                 type_ids_a = torch.ones(B, L_a, dtype=torch.long, device=x_a.device)
-                
+
                 x_s = x_s + self.fusion_type_embed(type_ids_s)
                 x_a = x_a + self.fusion_type_embed(type_ids_a)
 
-            for blk in self.fusion_blocks:
-                x_s, x_a = blk(x_s, x_a, mask_s=s_pad_mask, mask_a=a_pad_mask)
+            att_s_out, att_a_out = None, None
+            for layer_index, blk in enumerate(self.fusion_blocks):
+                if tar_layer is not None and layer_index == tar_layer:
+                    need_att = capture_att or (tmp_att_s is not None) or (tmp_att_a is not None)
+                    out = blk(x_s, x_a, mask_s=s_pad_mask, mask_a=a_pad_mask,
+                              tmp_att_s=tmp_att_s, tmp_att_a=tmp_att_a, return_att=need_att)
+                    if need_att:
+                        x_s, x_a, att_s_out, att_a_out = out
+                    else:
+                        x_s, x_a = out
+                else:
+                    x_s, x_a = blk(x_s, x_a, mask_s=s_pad_mask, mask_a=a_pad_mask)
 
             x = self._combine_kept_tokens(x_s, x_a, ids_keep)
             x = self.fusion_norm(x)
 
+            if capture_att or tmp_att_s is not None or tmp_att_a is not None:
+                return x, att_s_out, att_a_out
             return x
 
         # --- SELF ATTENTION ---
