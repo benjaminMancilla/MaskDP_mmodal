@@ -290,8 +290,9 @@ def main(cfg):
           "comparison metrics (Spearman, IoU, noise floor, etc.).")
     print("[SARFA] Qualitative cases: run "
           "analysis/select_qualitative_states.py on this output folder "
-          "to filter disagreeing states; counterfactual branching and "
-          "human recording are not yet implemented.")
+          "to filter disagreeing states, then analysis/rollout_from_state.py "
+          "to play each model forward from those states. Human-recorded states: "
+          "analysis/record_interactive.py.")
 
     if cfg.use_wandb:
         wandb.finish()
