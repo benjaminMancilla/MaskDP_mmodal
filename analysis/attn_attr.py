@@ -238,17 +238,16 @@ def build_attribution_tree(
                 state[v] = 'Appear'
     n_nodes_from_encoder = len(V) - n_nodes_before_encoder
 
-    # 4. Virtual terminal: TARGET connects to everything left in the tree, from
-    #    EITHER phase, however many hops away (same as [CLS] in the original --
-    #    automatic connection, not score-based). Runs after phase 3b so it also
-    #    picks up any node the encoder phase added.
+    # 4. Virtual terminal: TARGET attaches to the roots of the attribution
+    #    structure -- the nodes no real edge points at, normally just the TopNode.
+    #    Connecting it to every node instead is a fan of unscored edges that
+    #    carries no information.
     target = ('TARGET', 0)
+    has_parent = {dst for _, dst, _ in E}
+    roots = [n for n in V if n not in has_parent and state.get(n) in ('Appear', 'Fixed')]
     V.append(target)
-    for node in V:
-        if node == target:
-            continue
-        if state.get(node) in ('Appear', 'Fixed'):
-            E.append((target, node, 'terminal'))
+    for node in roots:
+        E.append((target, node, 'terminal'))
 
     # 5. Apply labels only on return (does not affect tree construction)
     V_labeled = [
