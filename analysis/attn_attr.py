@@ -86,6 +86,20 @@ def attn_attr_encoder(agent, stream: str, tar_layer: int, action_idx: int, m: in
     return attr.squeeze(0)
 
 
+def token_timesteps(t_target: int, n_s: int, n_a: int):
+    """
+    Maps attribution row/column indices to real environment timesteps. Returns
+    (ts_state, ts_action); state token i and action token j both sit at
+    `t_target - (n_s - 1) + index`, so index n_s-1 is the frame being decided on.
+    """
+    assert n_a == n_s - 1, (
+        f"expected n_a == n_s - 1 from the interleaved eval buffers, got n_s={n_s}, "
+        f"n_a={n_a}; the timestep mapping does not hold otherwise"
+    )
+    start = t_target - (n_s - 1)
+    return np.arange(start, start + n_s), np.arange(start, start + n_a)
+
+
 def attribution_range_diagnostics(attr_s: torch.Tensor, attr_a: torch.Tensor):
     """
     Range of the head-summed attribution matrices, used to sanity-check a threshold `tau` 
