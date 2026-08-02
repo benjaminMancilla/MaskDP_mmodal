@@ -50,6 +50,42 @@ def attn_attr_fusion(agent, tar_layer: int, action_idx: int, m: int = 20):
     return attr_s.squeeze(0), attr_a.squeeze(0)
 
 
+def attn_attr_encoder(agent, stream: str, tar_layer: int, action_idx: int, m: int = 20):
+    """
+    Same IG mechanism as `attn_attr_fusion`, but targets a self-attention layer of
+    `state_encoder_blocks` ('s') or `action_encoder_blocks` ('a') -- the pre-fusion
+    unimodal streams -- instead of the fusion cross-attention. Fusion runs with its
+    real (unhooked) attention throughout.
+
+    Returns attr_enc: [n_head, T, T] (T = n_s for 's', n_a for 'a').
+    """
+    agent.eval()
+
+    n_s = len(agent._obs_buffer)
+    assert n_s > 0, "attn_attr_encoder() requires a non-empty obs buffer."
+
+    with torch.no_grad():
+        _, att = agent._forward_for_attr_encoder(stream, tar_layer, capture_att=True)
+    att = att.detach()
+
+    grad_accum = torch.zeros_like(att)
+
+    for k in range(1, m + 1):
+        alpha = k / m
+        tmp_att = (alpha * att).clone().requires_grad_(True)
+
+        pred_a, _ = agent._forward_for_attr_encoder(stream, tar_layer, tmp_att=tmp_att)
+        target_logit = pred_a[n_s - 1, action_idx]
+
+        agent.mdp.zero_grad(set_to_none=True)
+        target_logit.backward()
+
+        grad_accum += tmp_att.grad
+
+    attr = att * (grad_accum / m)
+    return attr.squeeze(0)
+
+
 def attribution_range_diagnostics(attr_s: torch.Tensor, attr_a: torch.Tensor):
     """
     Range of the head-summed attribution matrices, used to sanity-check a threshold `tau` 
@@ -74,23 +110,38 @@ def attribution_range_diagnostics(attr_s: torch.Tensor, attr_a: torch.Tensor):
 def build_attribution_tree(
     attr_s: torch.Tensor,   # [n_head, T_s, T_a] -- attribution matrix for state
     attr_a: torch.Tensor,   # [n_head, T_a, T_s] -- attribution matrix for action
-    tau: float = 0.4,       # edge threshold
+    tau: float = 0.4,       # edge threshold (fusion layer)
     label_fn=None,          # optional: label_fn(stream: 's'|'a', kept_idx: int) -> str
                             # default: f"{stream}_{kept_idx}"
+    attr_enc_s=None,        # optional [n_head, T_s, T_s] -- state_encoder_blocks self-attn
+    attr_enc_a=None,        # optional [n_head, T_a, T_a] -- action_encoder_blocks self-attn
+    tau_enc=None,           # edge threshold for the encoder phase; defaults to `tau`
+    exclude_self_loops=True,  # drop i==j edges in the encoder phase (self-attention only)
 ):
     """
-    Constructs an attribution tree adapted from Hao et al. 2021. 
-    Returns V (list of node labels) and E (list of (src, dst, kind)), 
-    where kind is 'real' or 'terminal' for differentiated rendering.
+    Constructs an attribution tree adapted from Hao et al. 2021, Algorithm 1.
+    Returns (V, E, diagnostics): V is a list of node labels, E is a list of
+    (src, dst, kind) with kind in {'real', 'real_encoder', 'terminal'}.
 
-    The 'TARGET' node is virtual (not a real model token) and represents 
+    The 'TARGET' node is virtual (not a real model token) and represents
     the target prediction logit.
 
-    Since this operates over a single layer, the resulting tree has 
-    depth 1 by construction.
+    Phase 1 (fusion, always runs) gives depth 1: root + direct cross-attention
+    neighbors. Phase 2 (optional, `attr_enc_s`/`attr_enc_a`) extends any node that
+    survived phase 1 into ITS OWN pre-fusion self-attention neighbors (same
+    stream, same token index space -- state_encoder/action_encoder tokens map
+    1:1 onto the 's'/'a' tokens fusion already saw), giving depth 2. This mirrors
+    the paper's per-layer pass from the target backward: process the layer
+    closest to the target first, then expand only the nodes that already
+    survived using the next layer back -- never a fresh top-node search.
+
+    With `attr_enc_s=attr_enc_a=None` (default), phase 2 is skipped and the tree
+    stays flat (depth 1).
     """
     if label_fn is None:
         label_fn = lambda stream, idx: f"{stream}_{idx}"
+    if tau_enc is None:
+        tau_enc = tau
 
     a_s = attr_s.sum(dim=0)   # [T_s, T_a], summed over heads
     a_a = attr_a.sum(dim=0)   # [T_a, T_s]
@@ -118,7 +169,7 @@ def build_attribution_tree(
     state[top_node] = 'Appear'
     E = []
 
-    # 3. Build downward
+    # 3. Fusion layer: build downward
     edges_s = [(('s', i), ('a', j), a_s[i, j].item())
                for i in range(T_s) for j in range(T_a) if a_s[i, j].item() > tau]
     edges_a = [(('a', i), ('s', j), a_a[i, j].item())
@@ -137,8 +188,46 @@ def build_attribution_tree(
             V.append(v)
             state[v] = 'Appear'
 
-    # 4. Virtual terminal: TARGET connects to everything left in the tree
-    #    (automatic connection to all relevant nodes, not score-based)
+    # 3b. Encoder layer (optional): expand nodes that survived fusion into their
+    #     own pre-fusion self-attention neighbors, one layer further from the target.
+    n_nodes_before_encoder = len(V)
+    if attr_enc_s is not None or attr_enc_a is not None:
+        edges_enc = []
+        if attr_enc_s is not None:
+            a_enc_s = attr_enc_s.sum(dim=0)   # [T_s, T_s]
+            assert a_enc_s.shape == (T_s, T_s), (
+                f"attr_enc_s shape {tuple(a_enc_s.shape)} does not match T_s={T_s} from attr_s"
+            )
+            edges_enc += [(('s', i), ('s', j), a_enc_s[i, j].item())
+                          for i in range(T_s) for j in range(T_s)
+                          if (not exclude_self_loops or i != j) and a_enc_s[i, j].item() > tau_enc]
+        if attr_enc_a is not None:
+            a_enc_a = attr_enc_a.sum(dim=0)   # [T_a, T_a]
+            assert a_enc_a.shape == (T_a, T_a), (
+                f"attr_enc_a shape {tuple(a_enc_a.shape)} does not match T_a={T_a} from attr_a"
+            )
+            edges_enc += [(('a', i), ('a', j), a_enc_a[i, j].item())
+                          for i in range(T_a) for j in range(T_a)
+                          if (not exclude_self_loops or i != j) and a_enc_a[i, j].item() > tau_enc]
+
+        for u, v, w in edges_enc:
+            if u not in state or v not in state:
+                continue
+            if state[u] == 'Appear' and state[v] == 'NotAppear':
+                E.append((u, v, 'real_encoder'))
+                V.append(v)
+                state[u] = 'Fixed'
+                state[v] = 'Appear'
+            elif state[u] == 'Fixed' and state[v] == 'NotAppear':
+                E.append((u, v, 'real_encoder'))
+                V.append(v)
+                state[v] = 'Appear'
+    n_nodes_from_encoder = len(V) - n_nodes_before_encoder
+
+    # 4. Virtual terminal: TARGET connects to everything left in the tree, from
+    #    EITHER phase, however many hops away (same as [CLS] in the original --
+    #    automatic connection, not score-based). Runs after phase 3b so it also
+    #    picks up any node the encoder phase added.
     target = ('TARGET', 0)
     V.append(target)
     for node in V:
@@ -166,5 +255,6 @@ def build_attribution_tree(
         "n_edges": len(E_labeled),
         "n_orphans": n_orphans,
         "n_candidate_tokens": n_total,
+        "n_nodes_from_encoder": n_nodes_from_encoder,
     }
     return V_labeled, E_labeled, diagnostics
