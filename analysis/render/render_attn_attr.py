@@ -88,6 +88,9 @@ def main():
                         help="filmstrip accordion: column mass below this fraction of "
                              "the peak counts as quiet")
     parser.add_argument("--max-arcs", type=int, default=40)
+    parser.add_argument("--window", type=int, default=None,
+                        help="filmstrip: keep only the last N timesteps. A crop, so "
+                             "it is reported in the caption; the matrix stays whole")
     parser.add_argument("--thumb-zoom", type=float, default=0.42)
     parser.add_argument("--sarfa-eval", default=None,
                         help="eval_model of the SARFA cell to overlay on tree nodes; "
@@ -118,11 +121,12 @@ def main():
     a_enc_s = head_sum(data["attr_enc_s"]) if "attr_enc_s" in data else None
     a_enc_a = head_sum(data["attr_enc_a"]) if "attr_enc_a" in data else None
 
-    for name, mat in (("a_s", a_s), ("a_a", a_a),
-                      ("a_enc_s", a_enc_s), ("a_enc_a", a_enc_a)):
+    for name, mat, query, key in (("a_s", a_s, "s", "a"), ("a_a", a_a, "a", "s"),
+                                  ("a_enc_s", a_enc_s, "s", "s"),
+                                  ("a_enc_a", a_enc_a, "a", "a")):
         if mat is not None:
-            print(f"[render_attn_attr] {name}: |attribution| above the diagonal = "
-                  f"{upper_triangle_mass(mat):.4f} of the total "
+            print(f"[render_attn_attr] {name}: |attribution| on later tokens = "
+                  f"{upper_triangle_mass(mat, query, key):.4f} of the total "
                   f"(0 means causally masked)")
 
     out_dir = Path(args.out_dir or Path(args.states_dir) / "renders")
@@ -184,7 +188,7 @@ def main():
         fig = render_filmstrip(
             a_s, a_a, ts_state, ts_action, frames, actions, a_enc_s, a_enc_a,
             quiet_frac=args.quiet_frac, max_arcs=args.max_arcs,
-            thumb_zoom=args.thumb_zoom * 0.8,
+            thumb_zoom=args.thumb_zoom, window=args.window,
             title=f"Attribution filmstrip -- {subtitle}",
         )
         written += save_figure(fig, out_dir, f"{stem}_filmstrip")

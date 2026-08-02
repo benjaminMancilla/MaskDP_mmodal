@@ -82,18 +82,23 @@ def normalize(mat, mode):
     raise ValueError(f"unknown normalization mode: {mode!r}")
 
 
-def upper_triangle_mass(mat):
+def upper_triangle_mass(mat, query_stream, key_stream):
     """
-    Fraction of |attribution| above the diagonal -- attention pointing forward in
-    time. Both streams start at the same timestep, so column > row is the future
-    in every block. Zero means the path is causally masked.
+    Fraction of |attribution| the query spends on keys that are later in time.
+    Zero means the path is causally masked.
+
+    The cut is not the same in every block. Tokens interleave as
+    s_0 a_0 s_1 a_1..., so s_i sits at position 2i and a_j at 2j+1: for the
+    state -> action block a_j is already in the future at j == i, while every
+    other block only looks forward at j > i.
     """
     if mat is None:
         return float("nan")
     mat = np.abs(np.asarray(mat))
     rows, cols = np.indices(mat.shape)
+    forward = cols >= rows if (query_stream, key_stream) == ("s", "a") else cols > rows
     total = mat.sum()
-    return float(mat[cols > rows].sum() / total) if total > 0 else 0.0
+    return float(mat[forward].sum() / total) if total > 0 else 0.0
 
 
 def parse_node(label):
@@ -440,6 +445,13 @@ def render_attribution_tree(V, E, mats, ts_state, ts_action, frames, actions,
     x_min, x_max = min(all_ts), max(all_ts)
     ax.axhspan(0.55, 1.15, color=COLOR_TARGET, alpha=0.06, zorder=0)
 
+    # Terminal edges are dotted rather than weighted: TARGET attaches to the
+    # tree's root by construction, without a score.
+    for node in {resolve(v) for u, v, k in E if k == "terminal"} & drawn:
+        x, y = position(node)
+        ax.plot([t_target, x], [0.78, y], linestyle=":", linewidth=0.6,
+                color=COLOR_TARGET, alpha=0.30, zorder=1)
+
     real_edges = [(u, v, k) for u, v, k in E if k != "terminal"]
     weights = [abs(edge_weight(u, v, k, mats)) for u, v, k in real_edges]
     peak = max(weights) if weights else 1.0
@@ -496,8 +508,8 @@ def render_attribution_tree(V, E, mats, ts_state, ts_action, frames, actions,
     for spine in ("top", "right", "left"):
         ax.spines[spine].set_visible(False)
 
-    note = ("terminal edges (TARGET -> every node) are omitted: automatic, "
-            "not score-based")
+    note = ("dotted: TARGET -> tree root, wired by construction and not scored. "
+            "solid: attribution, width by weight")
     if tree_diag is not None:
         note += (f"    |    {tree_diag['n_orphans']}/{tree_diag['n_candidate_tokens']} "
                  "tokens never entered the tree")
@@ -568,12 +580,26 @@ def _arc(ax, x0, y0, x1, y1, height, color, linewidth, alpha):
 
 def render_filmstrip(a_s, a_a, ts_state, ts_action, frames, actions,
                      a_enc_s=None, a_enc_a=None, a_enc_s_arcs=True,
-                     quiet_frac=0.05, max_arcs=40, thumb_zoom=0.34, title=None):
+                     quiet_frac=0.05, max_arcs=40, thumb_zoom=0.42,
+                     window=None, title=None):
     """
     Two rails on a time axis: frames on top, action glyphs below. Arcs split the
     plane into four bands -- state encoder above, fusion between the rails,
     action encoder below. Same relations as the 2x2 matrix, read as narrative.
+
+    `window` keeps only the last N timesteps. That is a deliberate crop, so it
+    is reported in the caption; the matrix stays the uncropped view.
     """
+    n_full = len(ts_state)
+    cropped = window is not None and window < n_full
+    if cropped:
+        cut = n_full - window
+        a_s, a_a = a_s[cut:, cut:], a_a[cut:, cut:]
+        a_enc_s = a_enc_s[cut:, cut:] if a_enc_s is not None else None
+        a_enc_a = a_enc_a[cut:, cut:] if a_enc_a is not None else None
+        ts_state, ts_action = ts_state[cut:], ts_action[cut:]
+        frames, actions = frames[cut:], actions[cut:]
+
     n_s, n_a = len(ts_state), len(ts_action)
     mass_state, mass_action = token_masses(a_s, a_a, a_enc_s, a_enc_a)
 
@@ -584,7 +610,7 @@ def render_filmstrip(a_s, a_a, ts_state, ts_action, frames, actions,
     n_collapsed = sum(1 for _, collapsed in columns if collapsed)
 
     y_state, y_action = 1.0, 0.0
-    fig, ax = plt.subplots(figsize=(max(9.0, 0.75 * len(columns)), 7.4))
+    fig, ax = plt.subplots(figsize=(max(8.0, 1.15 * len(columns)), 4.8))
 
     for position, (indices, collapsed) in enumerate(columns):
         if collapsed:
@@ -643,26 +669,28 @@ def render_filmstrip(a_s, a_a, ts_state, ts_action, frames, actions,
     if target_column is not None:
         ax.axvspan(target_column - 0.5, target_column + 0.5,
                    color=COLOR_TARGET, alpha=0.10, zorder=0)
-        ax.text(target_column, y_state + 1.05, "TARGET", ha="center", va="bottom",
+        ax.text(target_column, y_state + 0.68, "TARGET", ha="center", va="bottom",
                 fontsize=9, color=COLOR_TARGET)
 
     labels = []
     for indices, collapsed in columns:
         first = int(ts_state[indices[0]])
         labels.append(f"{first}+" if collapsed else str(first))
-    _apply_ticks(ax, "x", range(len(columns)), labels, rotation=90)
+    _apply_ticks(ax, "x", range(len(columns)), labels, fontsize=8,
+                 rotation=0 if len(columns) <= 12 else 90)
     ax.set_xlim(-0.8, len(columns) - 0.2)
-    ax.set_ylim(y_action - 1.15, y_state + 1.25)
+    ax.set_ylim(y_action - 0.45, y_state + 0.78)
     _apply_ticks(ax, "y", [y_action, y_state], ["actions", "states"], fontsize=9)
     ax.set_xlabel("environment timestep", fontsize=9)
     for spine in ("top", "right", "left"):
         ax.spines[spine].set_visible(False)
 
     ax.set_title(title or "Attribution filmstrip", fontsize=13)
+    crop = f"cropped to the last {window} of {n_full} timesteps    |    " if cropped else ""
     fig.text(0.5, 0.005,
-             f"accordion: quiet_frac={quiet_frac}, {n_collapsed} runs collapsed    |    "
-             f"top {budget} arcs per band ({', '.join(bands)}), width normalized "
-             "within each band",
+             f"{crop}accordion: quiet_frac={quiet_frac}, {n_collapsed} runs collapsed"
+             f"    |    top {budget} arcs per band ({', '.join(bands)}), width "
+             "normalized within each band",
              ha="center", fontsize=8, color="#444444")
     fig.tight_layout(rect=(0, 0.03, 1, 1))
     return fig
