@@ -508,10 +508,10 @@ class MaskedDPMultimodal(nn.Module):
         ids_keep: torch.Tensor,
         s_pad_mask=None,
         a_pad_mask=None,
-        tar_layer: int = None,          # ATTATTR: index into self.fusion_blocks to intervene on
-        tmp_att_s: torch.Tensor = None, # ATTATTR: override (alpha*A) for cross_attn_s at tar_layer
-        tmp_att_a: torch.Tensor = None, # ATTATTR: override for cross_attn_a at tar_layer
-        capture_att: bool = False,      # ATTATTR: True on the baseline pass (no override) to read real A
+        tar_layer: int = None,          # index into self.fusion_blocks to intervene on
+        tmp_att_s: torch.Tensor = None, # override for cross_attn_s's post-softmax attention at tar_layer
+        tmp_att_a: torch.Tensor = None, # override for cross_attn_a's post-softmax attention at tar_layer
+        capture_att: bool = False,      # return the real attention at tar_layer instead of overriding it
     ) -> torch.Tensor:
         """Optional fusion encoder over kept tokens (after separate state/action encoders).
 

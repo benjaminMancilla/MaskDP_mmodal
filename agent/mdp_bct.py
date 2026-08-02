@@ -85,81 +85,21 @@ class BCTEvalAgentMultimodal:
     def eval(self):
         self.mdp.eval()
 
-    def _forward(self):
+    def _embed_and_encode(self, enc_target=None, enc_tmp_att=None, enc_capture_att=False):
         """
-        Same streams -> forward_fusion -> forward_decoder pipeline as
-        mdp_return.py::_forward, with T_total fixed to self.K (not T_cond+T_pred
-        there is no separate warmup/planning phase here, every step is the same).
+        Shared plumbing for `_forward()`/`_forward_for_attr()`/`_forward_for_attr_encoder()`:
+        embeds the obs/action buffers, runs `state_encoder_blocks`/`action_encoder_blocks`,
+        builds `ids_keep`. Read-only over the buffers.
+
+        `enc_target`: None (both encoder loops run unhooked) or `(stream, layer_index)`
+        with `stream in ('s', 'a')` -- that stream's loop becomes `enumerate` + intervene
+        at `layer_index` (same pattern as `forward_fusion`'s `tar_layer`); the other
+        stream's loop is untouched. `enc_tmp_att`/`enc_capture_att`: override / capture-only
+        at that layer.
+
+        Returns (x_s, x_a, ids_keep, a_pad_mask, real_positions, enc_att). `enc_att` is
+        None unless `enc_target` is set and `enc_tmp_att`/`enc_capture_att` requested it.
         """
-        T = self.K
-        enc_D = self.mdp.enc_n_embd
-        D = self.mdp.n_embd
-        n_s = len(self._obs_buffer)
-        n_a = len(self._action_buffer)
-
-        pos_s = torch.arange(n_s, device=self.device) * 2
-        pos_a = torch.arange(n_a, device=self.device) * 2 + 1
-        pos_embed = self.mdp.pos_embed
-
-        obs_np = np.stack(list(self._obs_buffer))                    # (n_s, H, W, C
-        obs_t = torch.as_tensor(obs_np, dtype=torch.float32, device=self.device).unsqueeze(0)
-        s_real = self.mdp._embed_states(obs_t)                       # (1, n_s, enc_D)
-        s_real = s_real + pos_embed[:, pos_s, :]
-
-        if n_a > 0:
-            act_np = np.stack(list(self._action_buffer))             # (n_a,) ints
-            act_t = torch.as_tensor(act_np, dtype=torch.long, device=self.device).unsqueeze(0)
-            a_real = self.mdp.action_embed(act_t)                     # (1, n_a, enc_D)
-            a_real = a_real + pos_embed[:, pos_a, :]
-            a_pad_mask = torch.zeros(1, n_a, dtype=torch.bool, device=self.device)
-        else:
-            a_real = s_real.new_empty(1, 0, enc_D)
-            a_pad_mask = torch.ones(1, 0, dtype=torch.bool, device=self.device)
-
-        s_attn = torch.ones(1, 1, n_s, n_s, device=self.device)
-        x_s = s_real
-        for blk in self.mdp.state_encoder_blocks:
-            x_s = blk(x_s, s_attn)
-        x_s = self.mdp.state_encoder_norm(x_s)
-        x_s = self.mdp.state_proj(x_s)
-
-        if n_a > 0:
-            a_attn = torch.ones(1, 1, n_a, n_a, device=self.device)
-            x_a = a_real
-            for blk in self.mdp.action_encoder_blocks:
-                x_a = blk(x_a, a_attn)
-            x_a = self.mdp.action_encoder_norm(x_a)
-            x_a = self.mdp.action_proj(x_a)
-        else:
-            x_a = x_s.new_empty(1, 0, D)
-
-        real_positions = torch.cat([pos_s, pos_a], dim=0)
-        _, sort_idx = torch.sort(real_positions)
-        ids_keep = real_positions[sort_idx].unsqueeze(0)
-
-        x_fused = self.mdp.forward_fusion(
-            x_s, x_a, ids_keep, s_pad_mask=None, a_pad_mask=a_pad_mask,
-        )
-
-        total_len = 2 * T
-        mask = torch.ones(total_len, dtype=torch.bool, device=self.device)
-        mask[real_positions] = False
-        masked_positions = torch.arange(total_len, device=self.device)[mask]
-        ids_shuffle = torch.cat([ids_keep[0], masked_positions], dim=0)
-        ids_restore = torch.argsort(ids_shuffle).unsqueeze(0)
-
-        # valid_il=None: closed-loop has no concept of padding. Every position
-        # after the current one is legitimate future not yet observed.
-        _, pred_a = self.mdp.forward_decoder(x_fused, ids_restore, valid_il=None)   # (1, K, num_actions) logits
-        return pred_a[0]                                             # (K, num_actions)
-
-    def _forward_for_attr(self, tar_layer, tmp_att_s=None, tmp_att_a=None, capture_att=False):
-        """
-        Structural copy of `_forward()` but for ATTATTR hooks.
-
-        Returns (pred_a, att_s, att_a) with pred_a of shape (K, num_actions)
-        """
-        T = self.K
         enc_D = self.mdp.enc_n_embd
         D = self.mdp.n_embd
         n_s = len(self._obs_buffer)
@@ -184,18 +124,38 @@ class BCTEvalAgentMultimodal:
             a_real = s_real.new_empty(1, 0, enc_D)
             a_pad_mask = torch.ones(1, 0, dtype=torch.bool, device=self.device)
 
+        enc_stream, enc_layer = enc_target if enc_target is not None else (None, None)
+        enc_att = None
+        enc_need_att = enc_capture_att or (enc_tmp_att is not None)
+
         s_attn = torch.ones(1, 1, n_s, n_s, device=self.device)
         x_s = s_real
-        for blk in self.mdp.state_encoder_blocks:
-            x_s = blk(x_s, s_attn)
+        if enc_stream == 's':
+            for layer_index, blk in enumerate(self.mdp.state_encoder_blocks):
+                if layer_index == enc_layer:
+                    out = blk(x_s, s_attn, tmp_att=enc_tmp_att, return_att=enc_need_att)
+                    x_s, enc_att = out if enc_need_att else (out, None)
+                else:
+                    x_s = blk(x_s, s_attn)
+        else:
+            for blk in self.mdp.state_encoder_blocks:
+                x_s = blk(x_s, s_attn)
         x_s = self.mdp.state_encoder_norm(x_s)
         x_s = self.mdp.state_proj(x_s)
 
         if n_a > 0:
             a_attn = torch.ones(1, 1, n_a, n_a, device=self.device)
             x_a = a_real
-            for blk in self.mdp.action_encoder_blocks:
-                x_a = blk(x_a, a_attn)
+            if enc_stream == 'a':
+                for layer_index, blk in enumerate(self.mdp.action_encoder_blocks):
+                    if layer_index == enc_layer:
+                        out = blk(x_a, a_attn, tmp_att=enc_tmp_att, return_att=enc_need_att)
+                        x_a, enc_att = out if enc_need_att else (out, None)
+                    else:
+                        x_a = blk(x_a, a_attn)
+            else:
+                for blk in self.mdp.action_encoder_blocks:
+                    x_a = blk(x_a, a_attn)
             x_a = self.mdp.action_encoder_norm(x_a)
             x_a = self.mdp.action_proj(x_a)
         else:
@@ -204,6 +164,43 @@ class BCTEvalAgentMultimodal:
         real_positions = torch.cat([pos_s, pos_a], dim=0)
         _, sort_idx = torch.sort(real_positions)
         ids_keep = real_positions[sort_idx].unsqueeze(0)
+
+        return x_s, x_a, ids_keep, a_pad_mask, real_positions, enc_att
+
+    def _build_ids_restore(self, real_positions, ids_keep):
+        total_len = 2 * self.K
+        mask = torch.ones(total_len, dtype=torch.bool, device=self.device)
+        mask[real_positions] = False
+        masked_positions = torch.arange(total_len, device=self.device)[mask]
+        ids_shuffle = torch.cat([ids_keep[0], masked_positions], dim=0)
+        return torch.argsort(ids_shuffle).unsqueeze(0)
+
+    def _forward(self):
+        """
+        Same streams -> forward_fusion -> forward_decoder pipeline as
+        mdp_return.py::_forward, with T_total fixed to self.K (not T_cond+T_pred
+        there is no separate warmup/planning phase here, every step is the same).
+        """
+        x_s, x_a, ids_keep, a_pad_mask, real_positions, _ = self._embed_and_encode()
+
+        x_fused = self.mdp.forward_fusion(
+            x_s, x_a, ids_keep, s_pad_mask=None, a_pad_mask=a_pad_mask,
+        )
+        ids_restore = self._build_ids_restore(real_positions, ids_keep)
+
+        # valid_il=None: closed-loop has no concept of padding. Every position
+        # after the current one is legitimate future not yet observed.
+        _, pred_a = self.mdp.forward_decoder(x_fused, ids_restore, valid_il=None)   # (1, K, num_actions) logits
+        return pred_a[0]                                             # (K, num_actions)
+
+    def _forward_for_attr(self, tar_layer, tmp_att_s=None, tmp_att_a=None, capture_att=False):
+        """
+        Same pipeline as `_forward()`, but threads the fusion-layer attention override
+        hooks through `forward_fusion`.
+
+        Returns (pred_a, att_s, att_a) with pred_a of shape (K, num_actions).
+        """
+        x_s, x_a, ids_keep, a_pad_mask, real_positions, _ = self._embed_and_encode()
 
         need_att = capture_att or (tmp_att_s is not None) or (tmp_att_a is not None)
         out = self.mdp.forward_fusion(
@@ -214,16 +211,37 @@ class BCTEvalAgentMultimodal:
             x_fused, att_s, att_a = out
         else:
             x_fused, att_s, att_a = out, None, None
-
-        total_len = 2 * T
-        mask = torch.ones(total_len, dtype=torch.bool, device=self.device)
-        mask[real_positions] = False
-        masked_positions = torch.arange(total_len, device=self.device)[mask]
-        ids_shuffle = torch.cat([ids_keep[0], masked_positions], dim=0)
-        ids_restore = torch.argsort(ids_shuffle).unsqueeze(0)
+        ids_restore = self._build_ids_restore(real_positions, ids_keep)
 
         _, pred_a = self.mdp.forward_decoder(x_fused, ids_restore, valid_il=None)   # (1, K, num_actions)
         return pred_a[0], att_s, att_a                                              # (K, num_actions), ...
+
+    def _forward_for_attr_encoder(self, stream, tar_layer, tmp_att=None, capture_att=False):
+        """
+        Same pipeline as `_forward()`, but threads an attention override hook through
+        `state_encoder_blocks`/`action_encoder_blocks` instead of fusion. Fusion runs
+        with its real, unhooked attention.
+
+        Returns (pred_a, enc_att) with pred_a of shape (K, num_actions).
+        """
+        assert stream in ('s', 'a'), f"stream must be 's' or 'a', got {stream!r}"
+        if stream == 'a':
+            assert len(self._action_buffer) > 0, (
+                "no action tokens in the buffer yet -- action-encoder attribution "
+                "needs at least one action (not the very first step of an episode)."
+            )
+
+        x_s, x_a, ids_keep, a_pad_mask, real_positions, enc_att = self._embed_and_encode(
+            enc_target=(stream, tar_layer), enc_tmp_att=tmp_att, enc_capture_att=capture_att,
+        )
+
+        x_fused = self.mdp.forward_fusion(
+            x_s, x_a, ids_keep, s_pad_mask=None, a_pad_mask=a_pad_mask,
+        )
+        ids_restore = self._build_ids_restore(real_positions, ids_keep)
+
+        _, pred_a = self.mdp.forward_decoder(x_fused, ids_restore, valid_il=None)   # (1, K, num_actions)
+        return pred_a[0], enc_att                                                   # (K, num_actions), ...
 
     def _embed_state_stream(self, obs_list, n_s, override_index, override_batch, B):
         """

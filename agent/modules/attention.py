@@ -47,7 +47,6 @@ class CrossAttention(nn.Module):
         # x: Query [B, T_x, C]
         # context: Key/Value [B, T_ctx, C]
         # key_padding_mask: [B, T_ctx] bool
-        # tmp_att: optional [B, nh, T_x, T_ctx] override for the post-softmax attention
 
         B, T_x, C = x.size()
         B, T_ctx, _ = context.size()
@@ -71,9 +70,7 @@ class CrossAttention(nn.Module):
         else:
             att = F.softmax(att, dim=-1)
 
-        # tmp_att substitutes the real attention with an IG interpolation alpha*att.
-        # Must only be used in eval() (attn_drop is identity there); in train mode
-        # stochastic dropout would invalidate the substitution.
+        # tmp_att substitutes the real attention with an IG interpolation alpha*att
         att_used = tmp_att if tmp_att is not None else att
         att_used = self.attn_drop(att_used)
 
@@ -83,7 +80,7 @@ class CrossAttention(nn.Module):
         y = self.resid_drop(self.proj(y))
 
         if return_att or tmp_att is not None:
-            return y, att  # att = real attention, always (even if it was substituted)
+            return y, att
         return y
 
 
@@ -173,7 +170,7 @@ class CausalSelfAttention(nn.Module):
         # causal mask to ensure that attention is only applied to the left in the input sequence
         self.n_head = config.n_head
 
-    def forward(self, x, mask):
+    def forward(self, x, mask, tmp_att=None, return_att=False):
         (
             B,
             T,
@@ -207,14 +204,19 @@ class CausalSelfAttention(nn.Module):
         att = F.softmax(att, dim=-1)
         att = att * mask_bool.to(dtype=att.dtype)
 
-        att = self.attn_drop(att)
-        y = att @ v  # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
+        # tmp_att substitutes the real attention with an IG interpolation alpha*att
+        att_used = tmp_att if tmp_att is not None else att
+        att_used = self.attn_drop(att_used)
+        y = att_used @ v  # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
         y = (
             y.transpose(1, 2).contiguous().view(B, T, C)
         )  # re-assemble all head outputs side by side
 
         # output projection
         y = self.resid_drop(self.proj(y))
+
+        if return_att or tmp_att is not None:
+            return y, att
         return y
 
 
@@ -235,9 +237,14 @@ class Block(nn.Module):
             nn.Dropout(config.resid_pdrop),
         )
 
-    def forward(self, x, mask):
-        x = x + self.attn(self.ln1(x), mask)
+    def forward(self, x, mask, tmp_att=None, return_att=False):
+        need_att = return_att or (tmp_att is not None)
+        out = self.attn(self.ln1(x), mask, tmp_att=tmp_att, return_att=need_att)
+        delta, att = out if need_att else (out, None)
+        x = x + delta
         x = x + self.mlp(self.ln2(x))
+        if need_att:
+            return x, att
         return x
 
 
