@@ -30,15 +30,15 @@ NUM_ACTIONS = len(ACTION_COMBOS)
 # figure also prints the action id next to the glyph, which is what keeps 3, 4
 # and 9-14 distinguishable once they render as no-ops.
 ACTION_GLYPHS = (
-    "←↓",   # 0
+    "↙",    # 0
     "←",    # 1
-    "←↑",   # 2
+    "↖",    # 2
     "↓",    # 3
     "·",    # 4
     "↑",    # 5
-    "→↓",   # 6
+    "↘",    # 6
     "→",    # 7
-    "→↑",   # 8
+    "↗",    # 8
     "D",    # 9
     "A",    # 10
     "W",    # 11
