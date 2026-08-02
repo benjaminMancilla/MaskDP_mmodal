@@ -92,6 +92,9 @@ def main():
                         help="filmstrip: keep only the last N timesteps. A crop, so "
                              "it is reported in the caption; the matrix stays whole")
     parser.add_argument("--thumb-zoom", type=float, default=0.42)
+    parser.add_argument("--crop-px", type=int, default=None,
+                        help="centered NxN crop of each frame; can hide part of "
+                             "the scene, so it is reported in the caption")
     parser.add_argument("--sarfa-eval", default=None,
                         help="eval_model of the SARFA cell to overlay on tree nodes; "
                              "the cell is read from states_dir")
@@ -156,7 +159,7 @@ def main():
     if "detail" in wanted and tree_state_idx and tree_action_idx:
         fig = render_matrix_detail(
             a_s, ts_state, ts_action, tree_state_idx, tree_action_idx,
-            row_frames=frames, col_actions=actions,
+            row_frames=frames, col_actions=actions, crop_px=args.crop_px,
             normalize_mode=args.normalize,
             title=f"fusion a_s, crop on the tree's tokens -- {subtitle}",
         )
@@ -178,7 +181,8 @@ def main():
         fig = render_attribution_tree(
             data["V"], data["E"], mats, ts_state, ts_action, frames, actions,
             t_target=t_target, tree_diag=tree_diag,
-            thumb_zoom=args.thumb_zoom, merge_runs=args.merge_runs,
+            thumb_zoom=args.thumb_zoom, crop_px=args.crop_px,
+            merge_runs=args.merge_runs,
             sarfa_by_state_idx=overlays,
             title=f"Attribution tree -- {subtitle}",
         )
@@ -188,7 +192,7 @@ def main():
         fig = render_filmstrip(
             a_s, a_a, ts_state, ts_action, frames, actions, a_enc_s, a_enc_a,
             quiet_frac=args.quiet_frac, max_arcs=args.max_arcs,
-            thumb_zoom=args.thumb_zoom, window=args.window,
+            thumb_zoom=args.thumb_zoom, crop_px=args.crop_px, window=args.window,
             title=f"Attribution filmstrip -- {subtitle}",
         )
         written += save_figure(fig, out_dir, f"{stem}_filmstrip")

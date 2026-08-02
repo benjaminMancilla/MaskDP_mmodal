@@ -184,6 +184,31 @@ def _apply_ticks(ax, axis, positions, labels, fontsize=7, rotation=0):
         ax.set_yticklabels(labels, fontsize=fontsize, rotation=rotation)
 
 
+def crop_center(frame, crop_px):
+    """
+    Centered square crop of a game frame. It can hide part of the scene, so the
+    figures that use it say so in the caption.
+    """
+    frame = np.asarray(frame)
+    height, width = frame.shape[:2]
+    if crop_px is None or crop_px >= min(height, width):
+        return frame
+    top, left = (height - crop_px) // 2, (width - crop_px) // 2
+    return frame[top:top + crop_px, left:left + crop_px]
+
+
+def _thumb(frame, crop_px, zoom):
+    """Crop plus the zoom that keeps the drawn box the size it had uncropped."""
+    full = np.asarray(frame)
+    cropped = crop_center(full, crop_px)
+    return cropped, zoom * (full.shape[0] / cropped.shape[0])
+
+
+def _glyph_fontsize(thumb_zoom, frame_px):
+    """Keeps an action box roughly the size of a state thumbnail."""
+    return max(6.0, 0.55 * frame_px * thumb_zoom)
+
+
 def _symmetric_limit(mat):
     mat = np.asarray(mat)
     if mat.size == 0:
@@ -255,22 +280,25 @@ def render_attribution_matrix(a_s, a_a, ts_state, ts_action,
 
 
 def render_matrix_detail(mat, row_ts, col_ts, row_idx, col_idx,
-                         row_frames=None, col_actions=None,
+                         row_frames=None, col_actions=None, crop_px=None,
                          normalize_mode="max", title=None):
     """
     Crop of one block, with frames as row headers and action glyphs as column
     headers. Pass the token indices the tree already selected.
+
+    The colorbar gets its own gridspec column: attaching it to the heatmap axes
+    steals width from it and leaves the glyph row wider, so the two stop lining up.
     """
     row_idx, col_idx = list(row_idx), list(col_idx)
     assert row_idx and col_idx, "detail crop needs at least one row and one column"
 
-    crop = normalize(np.asarray(mat)[np.ix_(row_idx, col_idx)], normalize_mode)
-    limit = _symmetric_limit(crop)
-    n_rows, n_cols = crop.shape
+    block = normalize(np.asarray(mat)[np.ix_(row_idx, col_idx)], normalize_mode)
+    limit = _symmetric_limit(block)
+    n_rows, n_cols = block.shape
 
-    fig = plt.figure(figsize=(1.1 * n_cols + 2.5, 1.1 * n_rows + 1.8))
-    grid = fig.add_gridspec(2, 2, width_ratios=[1, n_cols], height_ratios=[1, n_rows],
-                            wspace=0.04, hspace=0.04)
+    fig = plt.figure(figsize=(1.1 * n_cols + 3.4, 1.1 * n_rows + 1.8))
+    grid = fig.add_gridspec(2, 3, width_ratios=[1, n_cols, 0.35],
+                            height_ratios=[1, n_rows], wspace=0.10, hspace=0.04)
 
     ax_cols = fig.add_subplot(grid[0, 1])
     ax_cols.set_xlim(-0.5, n_cols - 0.5)
@@ -287,7 +315,7 @@ def render_matrix_detail(mat, row_ts, col_ts, row_idx, col_idx,
     ax_rows = fig.add_subplot(grid[1, 0])
     ax_rows.axis("off")
     if row_frames is not None:
-        tiles = [np.asarray(row_frames[i]) for i in row_idx]
+        tiles = [crop_center(row_frames[i], crop_px) for i in row_idx]
         ax_rows.imshow(np.concatenate(tiles, axis=0), aspect="auto",
                        interpolation="nearest")
         height = tiles[0].shape[0]
@@ -295,16 +323,19 @@ def render_matrix_detail(mat, row_ts, col_ts, row_idx, col_idx,
             ax_rows.axhline(position * height, color="white", linewidth=1.5)
 
     ax_heat = fig.add_subplot(grid[1, 1])
-    image = ax_heat.imshow(crop, cmap=CMAP, vmin=-limit, vmax=limit,
+    image = ax_heat.imshow(block, cmap=CMAP, vmin=-limit, vmax=limit,
                            interpolation="nearest", aspect="auto")
     _apply_ticks(ax_heat, "x", range(n_cols),
                  [str(int(col_ts[i])) for i in col_idx], rotation=90)
     _apply_ticks(ax_heat, "y", range(n_rows), [str(int(row_ts[i])) for i in row_idx])
     ax_heat.yaxis.tick_right()
     ax_heat.set_xlabel("key timestep", fontsize=8)
-    fig.colorbar(image, ax=ax_heat, fraction=0.046, pad=0.12)
+    fig.colorbar(image, cax=fig.add_subplot(grid[1, 2]))
 
     fig.suptitle(title or "Attribution detail", fontsize=12)
+    if crop_px:
+        fig.text(0.5, 0.005, f"frames cropped to a centered {crop_px}x{crop_px}",
+                 ha="center", fontsize=8, color="#444444")
     return fig
 
 
@@ -416,8 +447,8 @@ def _draw_action_node(ax, x, y, action_id, edgecolor, fontsize=13, badge=None):
 
 def render_attribution_tree(V, E, mats, ts_state, ts_action, frames, actions,
                             t_target, tree_diag=None, thumb_zoom=0.42,
-                            merge_runs=False, sarfa_by_state_idx=None,
-                            sarfa_zoom=0.95, title=None):
+                            crop_px=None, merge_runs=False,
+                            sarfa_by_state_idx=None, sarfa_zoom=0.95, title=None):
     """
     Layered DAG: y is BFS depth, x is the real timestep, so a long-range edge
     reads as one. 'terminal' edges are not drawn -- TARGET connects to every node
@@ -438,6 +469,7 @@ def render_attribution_tree(V, E, mats, ts_state, ts_action, frames, actions,
 
     drawn = {resolve(label) for label in V if label in depths}
     max_depth = max((depths[label] for label in drawn), default=0)
+    glyph_fontsize = _glyph_fontsize(thumb_zoom, np.asarray(frames[0]).shape[0])
 
     fig, ax = plt.subplots(figsize=(13, 2.4 + 1.35 * (max_depth + 1)))
 
@@ -482,11 +514,12 @@ def render_attribution_tree(V, E, mats, ts_state, ts_action, frames, actions,
                 color="#bbbbbb", zorder=1)
         if stream == "s":
             frame = np.asarray(frames[index])
-            zoom = thumb_zoom
+            base_zoom = thumb_zoom
             if sarfa_by_state_idx and index in sarfa_by_state_idx:
                 from analysis.render_saliency import overlay_heatmap  # pulls in scipy
                 frame = overlay_heatmap(frame, sarfa_by_state_idx[index])
-                zoom = sarfa_zoom
+                base_zoom = sarfa_zoom
+            frame, zoom = _thumb(frame, crop_px, base_zoom)
             _draw_state_node(ax, x, y, frame, zoom,
                              COLOR_ENC_S if depths[label] else COLOR_TARGET,
                              linewidth=2.0 if depths[label] == 0 else 1.2)
@@ -494,6 +527,7 @@ def render_attribution_tree(V, E, mats, ts_state, ts_action, frames, actions,
             size = run_size.get(label, 1)
             _draw_action_node(ax, x, y, int(actions[index]),
                               COLOR_ENC_A if depths[label] else COLOR_TARGET,
+                              fontsize=glyph_fontsize,
                               badge=f"x{size}" if size > 1 else None)
 
     ax.plot([t_target], [0.85], marker="*", markersize=20, color=COLOR_TARGET, zorder=5)
@@ -513,6 +547,8 @@ def render_attribution_tree(V, E, mats, ts_state, ts_action, frames, actions,
     if tree_diag is not None:
         note += (f"    |    {tree_diag['n_orphans']}/{tree_diag['n_candidate_tokens']} "
                  "tokens never entered the tree")
+    if crop_px:
+        note += f"    |    frames cropped to a centered {crop_px}x{crop_px}"
     if sarfa_by_state_idx:
         note += "    |    SARFA overlays are each normalized to their own max"
     ax.set_title(title or "Attribution tree", fontsize=13)
@@ -581,7 +617,7 @@ def _arc(ax, x0, y0, x1, y1, height, color, linewidth, alpha):
 def render_filmstrip(a_s, a_a, ts_state, ts_action, frames, actions,
                      a_enc_s=None, a_enc_a=None, a_enc_s_arcs=True,
                      quiet_frac=0.05, max_arcs=40, thumb_zoom=0.42,
-                     window=None, title=None):
+                     crop_px=None, window=None, title=None):
     """
     Two rails on a time axis: frames on top, action glyphs below. Arcs split the
     plane into four bands -- state encoder above, fusion between the rails,
@@ -610,6 +646,7 @@ def render_filmstrip(a_s, a_a, ts_state, ts_action, frames, actions,
     n_collapsed = sum(1 for _, collapsed in columns if collapsed)
 
     y_state, y_action = 1.0, 0.0
+    glyph_fontsize = _glyph_fontsize(thumb_zoom, np.asarray(frames[0]).shape[0])
     fig, ax = plt.subplots(figsize=(max(8.0, 1.15 * len(columns)), 4.8))
 
     for position, (indices, collapsed) in enumerate(columns):
@@ -621,10 +658,11 @@ def render_filmstrip(a_s, a_a, ts_state, ts_action, frames, actions,
                     ha="center", va="center", fontsize=8, zorder=4)
             continue
         index = indices[0]
-        _draw_state_node(ax, position, y_state, frames[index], thumb_zoom, "#888888")
+        frame, zoom = _thumb(frames[index], crop_px, thumb_zoom)
+        _draw_state_node(ax, position, y_state, frame, zoom, "#888888")
         if index < n_a:
             _draw_action_node(ax, position, y_action, int(actions[index]), "#888888",
-                              fontsize=11)
+                              fontsize=glyph_fontsize)
 
     # One budget per band, not a global top-k: encoder attribution is larger than
     # fusion attribution, so a shared ranking hides the fusion band entirely.
@@ -686,9 +724,11 @@ def render_filmstrip(a_s, a_a, ts_state, ts_action, frames, actions,
         ax.spines[spine].set_visible(False)
 
     ax.set_title(title or "Attribution filmstrip", fontsize=13)
-    crop = f"cropped to the last {window} of {n_full} timesteps    |    " if cropped else ""
+    note = f"last {window} of {n_full} timesteps    |    " if cropped else ""
+    if crop_px:
+        note += f"frames cropped to a centered {crop_px}x{crop_px}    |    "
     fig.text(0.5, 0.005,
-             f"{crop}accordion: quiet_frac={quiet_frac}, {n_collapsed} runs collapsed"
+             f"{note}accordion: quiet_frac={quiet_frac}, {n_collapsed} runs collapsed"
              f"    |    top {budget} arcs per band ({', '.join(bands)}), width "
              "normalized within each band",
              ha="center", fontsize=8, color="#444444")
