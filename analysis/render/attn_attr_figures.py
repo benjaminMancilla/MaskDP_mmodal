@@ -205,8 +205,22 @@ def _thumb(frame, crop_px, zoom):
 
 
 def _glyph_fontsize(thumb_zoom, frame_px):
-    """Keeps an action box roughly the size of a state thumbnail."""
-    return max(6.0, 0.55 * frame_px * thumb_zoom)
+    """
+    Action box a bit smaller than a state thumbnail, so neighbours do not touch.
+    A text bbox is roughly 1.8x its fontsize, hence the factor.
+    """
+    return max(6.0, 0.40 * frame_px * thumb_zoom)
+
+
+def _points_to_data_y(ax, points):
+    """
+    Vertical size, in data units, of something measured in points. Nodes are
+    drawn in points and arcs in data coordinates, so the two only line up once
+    the axes limits are final -- call this after set_xlim/set_ylim.
+    """
+    inverse = ax.transData.inverted()
+    pixels = points * ax.figure.dpi / 72.0
+    return abs(inverse.transform((0, pixels))[1] - inverse.transform((0, 0))[1])
 
 
 def _symmetric_limit(mat):
@@ -307,10 +321,10 @@ def render_matrix_detail(mat, row_ts, col_ts, row_idx, col_idx,
     if col_actions is not None:
         for position, index in enumerate(col_idx):
             action_id = int(col_actions[index])
-            ax_cols.text(position, 0.55, action_glyph(action_id),
-                         ha="center", va="center", fontsize=15)
-            ax_cols.text(position, 0.15, str(action_id),
-                         ha="center", va="center", fontsize=6, color="#777777")
+            ax_cols.text(position, 0.58, action_glyph(action_id),
+                         ha="center", va="center", fontsize=26)
+            ax_cols.text(position, 0.12, str(action_id),
+                         ha="center", va="center", fontsize=9, color="#777777")
 
     ax_rows = fig.add_subplot(grid[1, 0])
     ax_rows.axis("off")
@@ -475,6 +489,13 @@ def render_attribution_tree(V, E, mats, ts_state, ts_action, frames, actions,
 
     all_ts = list(ts_state) + list(ts_action)
     x_min, x_max = min(all_ts), max(all_ts)
+    # limits and axes geometry go first: _points_to_data_y needs a final transData
+    ax.set_xlim(x_min - 1.5, x_max + 1.5)
+    ax.set_ylim(-max_depth - 0.75, 1.3)
+    fig.subplots_adjust(left=0.06, right=0.99, top=0.90, bottom=0.13)
+    node_dy = _points_to_data_y(
+        ax, np.asarray(frames[0]).shape[0] * thumb_zoom) / 2.0
+
     ax.axhspan(0.55, 1.15, color=COLOR_TARGET, alpha=0.06, zorder=0)
 
     # Terminal edges are dotted rather than weighted: TARGET attaches to the
@@ -497,12 +518,13 @@ def render_attribution_tree(V, E, mats, ts_state, ts_action, frames, actions,
         color = COLOR_FUSION if kind == "real" else (
             COLOR_ENC_S if parse_node(source)[0] == "s" else COLOR_ENC_A
         )
-        # shrink is in points, so arrows stop at the node edge at any data scale
+        # Leave the parent's bottom edge and arrive at the child's top edge, so a
+        # long edge never approaches from the side or from underneath.
         ax.annotate(
-            "", xy=(x1, y1), xytext=(x0, y0),
+            "", xy=(x1, y1 + node_dy), xytext=(x0, y0 - node_dy),
             arrowprops=dict(arrowstyle="->", color=color, alpha=0.8,
                             linewidth=0.6 + 3.4 * (weight / peak) if peak > 0 else 0.6,
-                            shrinkA=20, shrinkB=20,
+                            shrinkA=0, shrinkB=0,
                             connectionstyle="arc3,rad=0.10"),
             zorder=2,
         )
@@ -534,8 +556,6 @@ def render_attribution_tree(V, E, mats, ts_state, ts_action, frames, actions,
     ax.text(t_target, 0.85, "  TARGET", ha="left", va="center", fontsize=9,
             color=COLOR_TARGET, zorder=5)
 
-    ax.set_xlim(x_min - 1.5, x_max + 1.5)
-    ax.set_ylim(-max_depth - 0.75, 1.3)
     _apply_ticks(ax, "y", [-d for d in range(max_depth + 1)],
                  [f"depth {d}" for d in range(max_depth + 1)], fontsize=8)
     ax.set_xlabel("environment timestep", fontsize=9)
@@ -552,8 +572,7 @@ def render_attribution_tree(V, E, mats, ts_state, ts_action, frames, actions,
     if sarfa_by_state_idx:
         note += "    |    SARFA overlays are each normalized to their own max"
     ax.set_title(title or "Attribution tree", fontsize=13)
-    fig.text(0.5, 0.005, note, ha="center", fontsize=8, color="#444444")
-    fig.tight_layout(rect=(0, 0.03, 1, 1))
+    fig.text(0.5, 0.015, note, ha="center", fontsize=8, color="#444444")
     return fig
 
 
@@ -646,8 +665,22 @@ def render_filmstrip(a_s, a_a, ts_state, ts_action, frames, actions,
     n_collapsed = sum(1 for _, collapsed in columns if collapsed)
 
     y_state, y_action = 1.0, 0.0
-    glyph_fontsize = _glyph_fontsize(thumb_zoom, np.asarray(frames[0]).shape[0])
-    fig, ax = plt.subplots(figsize=(max(8.0, 1.15 * len(columns)), 4.8))
+    headroom = 0.5  # room outside the rails for the encoder arcs
+    frame_px = np.asarray(frames[0]).shape[0]
+    glyph_fontsize = _glyph_fontsize(thumb_zoom, frame_px)
+    node_points = frame_px * thumb_zoom
+
+    # Height follows the thumbnail so the rails stay apart as the nodes grow.
+    fig, ax = plt.subplots(figsize=(max(8.0, 1.15 * len(columns)),
+                                    3.6 + 3.0 * node_points / 72.0))
+    ax.set_xlim(-0.8, len(columns) - 0.2)
+    ax.set_ylim(y_action - headroom, y_state + headroom)
+    fig.subplots_adjust(left=0.08, right=0.99, top=0.90, bottom=0.17)
+
+    # Half-heights of the two node kinds, in data units, so arcs can start at
+    # their edge instead of their centre and stop being hidden underneath them.
+    state_dy = _points_to_data_y(ax, node_points) / 2.0
+    action_dy = _points_to_data_y(ax, glyph_fontsize * 1.8) / 2.0
 
     for position, (indices, collapsed) in enumerate(columns):
         if collapsed:
@@ -685,30 +718,45 @@ def render_filmstrip(a_s, a_a, ts_state, ts_action, frames, actions,
         peaks[kind] = max((abs(w) for _, _, w in kept), default=1.0)
         candidates += [(kind, i, j, w) for i, j, w in kept]
 
-    for kind, i, j, weight in candidates:
-        x0, x1 = column_of.get(i), column_of.get(j)
-        if x0 is None or x1 is None or x0 == x1:
-            continue
+    drawn_arcs = [(k, i, j, w) for k, i, j, w in candidates
+                  if column_of.get(i) is not None and column_of.get(j) is not None
+                  and column_of[i] != column_of[j]]
+    max_span = max((abs(column_of[i] - column_of[j]) for _, i, j, _ in drawn_arcs),
+                   default=1)
+
+    def control_offset(rail_dy, span):
+        """Bezier control offset: clears the node, never leaves the axes."""
+        floor = rail_dy * 1.35
+        peak = floor if headroom <= floor else (
+            floor + (headroom - floor) * (span / max_span))
+        return 2.0 * (peak - rail_dy)
+
+    for kind, i, j, weight in drawn_arcs:
+        x0, x1 = column_of[i], column_of[j]
         peak = peaks[kind]
         linewidth = 0.5 + 2.8 * (abs(weight) / peak) if peak > 0 else 0.5
         span = abs(x1 - x0)
         if kind == "enc_s":
-            _arc(ax, x0, y_state, x1, y_state, 0.10 + 0.05 * span,
+            top = y_state + state_dy
+            _arc(ax, x0, top, x1, top, control_offset(state_dy, span),
                  COLOR_ENC_S, linewidth, 0.7)
         elif kind == "enc_a":
-            _arc(ax, x0, y_action, x1, y_action, -0.10 - 0.05 * span,
+            bottom = y_action - action_dy
+            _arc(ax, x0, bottom, x1, bottom, -control_offset(action_dy, span),
                  COLOR_ENC_A, linewidth, 0.7)
-        elif kind == "a_s":
-            _arc(ax, x0, y_state, x1, y_action, 0.0, COLOR_FUSION, linewidth, 0.55)
-        else:
-            _arc(ax, x0, y_action, x1, y_state, 0.0, COLOR_FUSION, linewidth, 0.55)
+        elif kind == "a_s":  # state -> action, bowed one way
+            _arc(ax, x0, y_state - state_dy, x1, y_action + action_dy,
+                 0.06, COLOR_FUSION, linewidth, 0.55)
+        else:                # action -> state, bowed the other
+            _arc(ax, x0, y_action + action_dy, x1, y_state - state_dy,
+                 -0.06, COLOR_FUSION, linewidth, 0.55)
 
     target_column = column_of.get(n_s - 1)
     if target_column is not None:
         ax.axvspan(target_column - 0.5, target_column + 0.5,
                    color=COLOR_TARGET, alpha=0.10, zorder=0)
-        ax.text(target_column, y_state + 0.68, "TARGET", ha="center", va="bottom",
-                fontsize=9, color=COLOR_TARGET)
+        ax.text(target_column, y_state + headroom * 0.92, "TARGET", ha="center",
+                va="top", fontsize=9, color=COLOR_TARGET)
 
     labels = []
     for indices, collapsed in columns:
@@ -716,8 +764,6 @@ def render_filmstrip(a_s, a_a, ts_state, ts_action, frames, actions,
         labels.append(f"{first}+" if collapsed else str(first))
     _apply_ticks(ax, "x", range(len(columns)), labels, fontsize=8,
                  rotation=0 if len(columns) <= 12 else 90)
-    ax.set_xlim(-0.8, len(columns) - 0.2)
-    ax.set_ylim(y_action - 0.45, y_state + 0.78)
     _apply_ticks(ax, "y", [y_action, y_state], ["actions", "states"], fontsize=9)
     ax.set_xlabel("environment timestep", fontsize=9)
     for spine in ("top", "right", "left"):
@@ -732,5 +778,4 @@ def render_filmstrip(a_s, a_a, ts_state, ts_action, frames, actions,
              f"    |    top {budget} arcs per band ({', '.join(bands)}), width "
              "normalized within each band",
              ha="center", fontsize=8, color="#444444")
-    fig.tight_layout(rect=(0, 0.03, 1, 1))
     return fig

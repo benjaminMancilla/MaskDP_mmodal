@@ -155,6 +155,10 @@ def main():
     tree_action_idx = sorted({i for label in data["V"]
                               for stream, i in [parse_node(label)]
                               if stream == "a"})
+    # contiguous rows: skipping frames only in this figure breaks the alignment
+    # with the filmstrip and the tree, and hides nothing useful
+    if tree_state_idx:
+        tree_state_idx = list(range(tree_state_idx[0], tree_state_idx[-1] + 1))
 
     if "detail" in wanted and tree_state_idx and tree_action_idx:
         fig = render_matrix_detail(
