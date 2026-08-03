@@ -41,7 +41,7 @@ class CausalSelfAttention(nn.Module):
         # causal mask to ensure that attention is only applied to the left in the input sequence
         self.n_head = config.n_head
 
-    def forward(self, x, mask):
+    def forward(self, x, mask, tmp_att=None, return_att=False):
         (
             B,
             T,
@@ -63,14 +63,20 @@ class CausalSelfAttention(nn.Module):
         att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
         att = att.masked_fill(mask[:, :, :T, :T] == 0, float("-inf"))
         att = F.softmax(att, dim=-1)
-        att = self.attn_drop(att)
-        y = att @ v  # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
+
+        # tmp_att substitutes the real attention with an IG interpolation alpha*att
+        att_used = tmp_att if tmp_att is not None else att
+        att_used = self.attn_drop(att_used)
+        y = att_used @ v  # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
         y = (
             y.transpose(1, 2).contiguous().view(B, T, C)
         )  # re-assemble all head outputs side by side
 
         # output projection
         y = self.resid_drop(self.proj(y))
+
+        if return_att or tmp_att is not None:
+            return y, att   # att is always the real attention, never the override
         return y
 
 
@@ -91,9 +97,14 @@ class Block(nn.Module):
             nn.Dropout(config.resid_pdrop),
         )
 
-    def forward(self, x, mask):
-        x = x + self.attn(self.ln1(x), mask)
+    def forward(self, x, mask, tmp_att=None, return_att=False):
+        need_att = return_att or (tmp_att is not None)
+        out = self.attn(self.ln1(x), mask, tmp_att=tmp_att, return_att=need_att)
+        delta, att = out if need_att else (out, None)
+        x = x + delta
         x = x + self.mlp(self.ln2(x))
+        if need_att:
+            return x, att
         return x
 
 

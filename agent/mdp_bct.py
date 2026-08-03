@@ -118,6 +118,45 @@ class BCTEvalAgent:
         _, pred_a = self.mdp.forward_decoder(x_keep, ids_restore, valid_tok=None)   # (1, K, num_actions)
         return pred_a[0]                                             # (K, num_actions)
 
+    def _forward_for_attr(self, tar_layer, tmp_att=None, capture_att=False):
+        """
+        Same pipeline as _forward(), but threads the attention override hooks through
+        the encoder_blocks at tar_layer.
+        """
+        T = self.K
+        D = self.mdp.n_embd
+        n_s = len(self._obs_buffer)
+        n_a = len(self._action_buffer)
+        len_keep = n_s + n_a
+
+        obs_np = np.stack(list(self._obs_buffer))                    # (n_s, H, W, C)
+        obs_t = torch.as_tensor(obs_np, dtype=torch.float32, device=self.device).unsqueeze(0)
+        s_emb = self.mdp._embed_states(obs_t)                        # (1, n_s, D)
+
+        x_keep = s_emb.new_empty(1, len_keep, D)
+        x_keep[:, 0::2] = s_emb
+        if n_a > 0:
+            act_np = np.stack(list(self._action_buffer))             # (n_a,) ints
+            act_t = torch.as_tensor(act_np, dtype=torch.long, device=self.device).unsqueeze(0)
+            a_emb = self.mdp.action_embed(act_t)                     # (1, n_a, D)
+            x_keep[:, 1::2] = a_emb
+
+        x_keep = x_keep + self.mdp.pos_embed[:, :len_keep, :]
+
+        need_att = capture_att or (tmp_att is not None)
+        att = None
+        for layer_index, blk in enumerate(self.mdp.encoder_blocks):
+            if layer_index == tar_layer:
+                out = blk(x_keep, self.mdp.attn_mask, tmp_att=tmp_att, return_att=need_att)
+                x_keep, att = out if need_att else (out, None)
+            else:
+                x_keep = blk(x_keep, self.mdp.attn_mask)
+        x_keep = self.mdp.encoder_norm(x_keep)
+
+        ids_restore = torch.arange(2 * T, device=self.device).unsqueeze(0)
+        _, pred_a = self.mdp.forward_decoder(x_keep, ids_restore, valid_tok=None)   # (1, K, num_actions)
+        return pred_a[0], att                                        # (K, num_actions), ...
+
     def _embed_state_stream(self, obs_list, n_s, override_index, override_batch, B):
         """
         Embeds the current obs-buffer contents into (B, n_s, D).
